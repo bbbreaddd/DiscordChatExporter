@@ -13,18 +13,31 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal class ExportContext(DiscordClient discord, ExportRequest request)
+internal class ExportContext(
+    DiscordClient? discord,
+    ExportRequest request,
+    IReadOnlyDictionary<Snowflake, Member>? members = null,
+    IReadOnlyDictionary<Snowflake, Role>? roles = null
+)
 {
-    private readonly Dictionary<Snowflake, Member?> _membersById = new();
-    private readonly Dictionary<Snowflake, Channel?> _channelsById = new();
-    private readonly Dictionary<Snowflake, Role> _rolesById = new();
+    private readonly Dictionary<Snowflake, Member?> _membersById =
+        members?.ToDictionary(kvp => kvp.Key, kvp => (Member?)kvp.Value)
+        ?? new Dictionary<Snowflake, Member?>();
+
+    private readonly Dictionary<Snowflake, Channel?> _channelsById = request
+        .Channel.GetParents()
+        .Append(request.Channel)
+        .ToDictionary(c => c.Id, c => (Channel?)c);
+
+    private readonly Dictionary<Snowflake, Role> _rolesById =
+        roles?.ToDictionary(kvp => kvp.Key, kvp => kvp.Value) ?? new Dictionary<Snowflake, Role>();
 
     private readonly ExportAssetDownloader _assetDownloader = new(
         request.AssetsDirPath,
         request.ShouldReuseAssets
     );
 
-    public DiscordClient Discord { get; } = discord;
+    public DiscordClient? Discord { get; } = discord;
 
     public ExportRequest Request { get; } = request;
 
@@ -38,6 +51,9 @@ internal class ExportContext(DiscordClient discord, ExportRequest request)
         CancellationToken cancellationToken = default
     )
     {
+        if (Discord is null)
+            return;
+
         await foreach (
             var channel in Discord.GetGuildChannelsAsync(Request.Guild.Id, cancellationToken)
         )
@@ -60,6 +76,9 @@ internal class ExportContext(DiscordClient discord, ExportRequest request)
         if (_channelsById.ContainsKey(id))
             return;
 
+        if (Discord is null)
+            return;
+
         var channel = await Discord.TryGetChannelAsync(id, cancellationToken);
 
         // Store the result even if it's null, to avoid re-fetching non-existing channels
@@ -74,6 +93,9 @@ internal class ExportContext(DiscordClient discord, ExportRequest request)
     )
     {
         if (_membersById.ContainsKey(id))
+            return;
+
+        if (Discord is null)
             return;
 
         var member = await Discord.TryGetGuildMemberAsync(Request.Guild.Id, id, cancellationToken);

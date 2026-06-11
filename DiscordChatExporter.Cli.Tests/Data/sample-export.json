@@ -1,0 +1,184 @@
+{
+  "guild": {
+    "id": "1063903591533404160",
+    "name": "Test Guild",
+    "iconUrl": "https://cdn.discordapp.com/embed/avatars/0.png"
+  },
+  "channel": {
+    "id": "1063903591533404161",
+    "type": "GuildTextChat",
+    "categoryId": "1063903591533404162",
+    "category": "Text Channels",
+    "name": "general",
+    "topic": "Test channel for conversion",
+    "iconUrl": null
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2023-06-15T13:00:00+00:00",
+  "messages": [
+    {
+      "id": "1100000000000000001",
+      "type": "Default",
+      "timestamp": "2023-06-15T12:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hello world, this is a test message.",
+      "author": {
+        "id": "1063903591533404163",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "1063903591533404170",
+            "name": "Member",
+            "color": "#FF5733",
+            "position": 1
+          }
+        ],
+        "avatarUrl": "https://cdn.discordapp.com/embed/avatars/1.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": []
+    },
+    {
+      "id": "1100000000000000002",
+      "type": "Default",
+      "timestamp": "2023-06-15T12:05:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Hey @Bobby, check this out!",
+      "author": {
+        "id": "1063903591533404163",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "1063903591533404170",
+            "name": "Member",
+            "color": "#FF5733",
+            "position": 1
+          }
+        ],
+        "avatarUrl": "https://cdn.discordapp.com/embed/avatars/1.png"
+      },
+      "attachments": [
+        {
+          "id": "1100000000000000010",
+          "url": "https://cdn.discordapp.com/attachments/1063903591533404161/1100000000000000010/image.png",
+          "fileName": "image.png",
+          "fileSizeBytes": 123456
+        }
+      ],
+      "embeds": [
+        {
+          "title": "Example Embed",
+          "url": "https://example.com",
+          "timestamp": null,
+          "description": "This is an example embed description.",
+          "color": "#3498DB",
+          "author": null,
+          "fields": [
+            {
+              "name": "Field Name",
+              "value": "Field Value",
+              "isInline": false
+            }
+          ],
+          "thumbnail": null,
+          "images": [],
+          "video": null,
+          "footer": null
+        }
+      ],
+      "stickers": [],
+      "reactions": [
+        {
+          "emoji": {
+            "id": "",
+            "name": "👍",
+            "code": "👍",
+            "isAnimated": false,
+            "imageUrl": "https://twemoji.maxcdn.com/v/latest/72x72/1f44d.png"
+          },
+          "count": 1,
+          "users": [
+            {
+              "id": "1063903591533404164",
+              "name": "bob",
+              "discriminator": "0000",
+              "nickname": "Bobby",
+              "color": "#3498DB",
+              "isBot": false,
+              "avatarUrl": "https://cdn.discordapp.com/embed/avatars/2.png"
+            }
+          ]
+        }
+      ],
+      "mentions": [
+        {
+          "id": "1063903591533404164",
+          "name": "bob",
+          "discriminator": "0000",
+          "nickname": "Bobby",
+          "color": "#3498DB",
+          "isBot": false,
+          "roles": [
+            {
+              "id": "1063903591533404171",
+              "name": "Helper",
+              "color": "#3498DB",
+              "position": 2
+            }
+          ],
+          "avatarUrl": "https://cdn.discordapp.com/embed/avatars/2.png"
+        }
+      ]
+    },
+    {
+      "id": "1100000000000000003",
+      "type": "ChannelNameChange",
+      "timestamp": "2023-06-15T12:10:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "Changed the channel name: off-topic",
+      "author": {
+        "id": "1063903591533404163",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "1063903591533404170",
+            "name": "Member",
+            "color": "#FF5733",
+            "position": 1
+          }
+        ],
+        "avatarUrl": "https://cdn.discordapp.com/embed/avatars/1.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": []
+    }
+  ],
+  "messageCount": 3
+}

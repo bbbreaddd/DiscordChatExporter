@@ -509,16 +509,24 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             // Reaction authors
             _writer.WriteStartArray("users");
 
-            await foreach (
-                var user in Context.Discord.GetMessageReactionsAsync(
-                    Context.Request.Channel.Id,
-                    message.Id,
-                    reaction.Emoji,
-                    cancellationToken
-                )
-            )
+            if (reaction.Users is not null)
             {
-                await WriteUserAsync(user, false, cancellationToken);
+                foreach (var user in reaction.Users)
+                    await WriteUserAsync(user, false, cancellationToken);
+            }
+            else if (Context.Discord is not null)
+            {
+                await foreach (
+                    var user in Context.Discord.GetMessageReactionsAsync(
+                        Context.Request.Channel.Id,
+                        message.Id,
+                        reaction.Emoji,
+                        cancellationToken
+                    )
+                )
+                {
+                    await WriteUserAsync(user, false, cancellationToken);
+                }
             }
 
             _writer.WriteEndArray();

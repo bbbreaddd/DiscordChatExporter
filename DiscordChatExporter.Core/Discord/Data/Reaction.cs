@@ -1,10 +1,11 @@
+using System.Collections.Generic;
 using System.Text.Json;
 using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Discord.Data;
 
 // https://discord.com/developers/docs/resources/channel#reaction-object
-public record Reaction(Emoji Emoji, int Count)
+public record Reaction(Emoji Emoji, int Count, IReadOnlyList<User>? Users = null)
 {
     public static Reaction Parse(JsonElement json)
     {

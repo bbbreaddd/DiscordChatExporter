@@ -11,6 +11,7 @@
 
 - [How to get Token and Channel IDs](Token-and-IDs.md)
 - [How to use message filters](Message-filters.md)
+- [Converting existing exports to other formats](Convert.md)
 - Export scheduling with CLI:
   - [Windows](Scheduling-Windows.md)
   - [macOS](Scheduling-MacOS.md)

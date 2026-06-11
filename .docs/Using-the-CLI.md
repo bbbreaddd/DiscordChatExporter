@@ -39,6 +39,7 @@ Type the following command in your terminal of choice, then press ENTER to run i
 | exportdm    | Exports all direct message channels                  |
 | exportguild | Exports all channels within the specified server     |
 | exportall   | Exports all accessible channels                      |
+| convert     | Converts an existing JSON export to another format   |
 | channels    | Outputs the list of channels in the given server     |
 | dm          | Outputs the list of direct message channels          |
 | guilds      | Outputs the list of accessible servers               |
@@ -266,6 +267,18 @@ To exclude DMs, add the `--include-dm false` option.
 ```console
 ./DiscordChatExporter.Cli exportall -t "mfa.Ifrn" --include-dm false
 ```
+
+### Convert an existing JSON export to another format
+
+To convert a previously exported JSON file into `PlainText`, `Csv`, `HtmlDark`, or `HtmlLight`,
+use the `convert` command. This works offline and doesn't require a token:
+
+```console
+./DiscordChatExporter.Cli convert -i export.json -f HtmlDark -o export.html
+```
+
+See [Converting existing exports](Convert.md) for more details, including batch conversion and
+output path templating.
 
 ### List channels in a server
 

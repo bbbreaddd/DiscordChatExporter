@@ -412,7 +412,9 @@
 
                         foreach (var inviteCode in inviteCodes)
                         {
-                            var invite = await Context.Discord.TryGetInviteAsync(inviteCode, CancellationToken);
+                            var invite = Context.Discord is not null
+                                ? await Context.Discord.TryGetInviteAsync(inviteCode, CancellationToken)
+                                : null;
                             if (invite is null)
                             {
                                 continue;
