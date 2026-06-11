@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
@@ -17,7 +20,17 @@ public abstract class DiscordCommandBase : ICommand
         EnvironmentVariable = "DISCORD_TOKEN",
         Description = "Authentication token."
     )]
-    public required string Token { get; set; }
+    public string? Token { get; set; }
+
+    [CommandOption(
+        "token-file",
+        EnvironmentVariable = "DISCORD_TOKEN_FILE",
+        Description = "Path to a file containing additional authentication tokens, one per line. "
+            + "If more than one token is available (via this option and/or --token), they will "
+            + "be used as fallbacks for one another -- if a request fails because the current "
+            + "token is invalid, lacks access, or is being rate limited, the next token will be tried."
+    )]
+    public string? TokenFile { get; set; }
 
     [CommandOption(
         "bot",
@@ -34,10 +47,43 @@ public abstract class DiscordCommandBase : ICommand
     )]
     public bool ShouldRespectRateLimits { get; set; } = true;
 
+    private IReadOnlyList<string> GetTokens()
+    {
+        var tokens = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(Token))
+            tokens.Add(Token.Trim());
+
+        if (!string.IsNullOrWhiteSpace(TokenFile))
+        {
+            if (!File.Exists(TokenFile))
+                throw new CommandException($"Token file '{TokenFile}' does not exist.");
+
+            foreach (var line in File.ReadLines(TokenFile))
+            {
+                var token = line.Trim();
+                if (string.IsNullOrEmpty(token) || token.StartsWith('#'))
+                    continue;
+
+                tokens.Add(token);
+            }
+        }
+
+        if (tokens.Count <= 0)
+        {
+            throw new CommandException(
+                "Missing authentication token. "
+                    + "Specify it using the '--token' option or provide a '--token-file'."
+            );
+        }
+
+        return tokens.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
     [field: AllowNull, MaybeNull]
     protected DiscordClient Discord =>
         field ??= new DiscordClient(
-            Token,
+            GetTokens(),
             ShouldRespectRateLimits ? RateLimitPreference.RespectAll : RateLimitPreference.IgnoreAll
         );
 

@@ -4,6 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:converters="clr-namespace:DiscordChatExporter.Gui.Converters"
     xmlns:dialogs="clr-namespace:DiscordChatExporter.Gui.ViewModels.Dialogs"
+    xmlns:materialIcons="clr-namespace:Material.Icons.Avalonia;assembly=Material.Icons.Avalonia"
     Width="380"
     x:DataType="dialogs:SettingsViewModel">
     <Grid RowDefinitions="Auto,*,Auto">
@@ -64,6 +65,25 @@
                         <TextBlock DockPanel.Dock="Left" Text="{Binding LocalizationManager.PersistTokenLabel}" />
                         <ToggleSwitch DockPanel.Dock="Right" IsChecked="{Binding IsTokenPersisted}" />
                     </DockPanel>
+
+                    <!--  Fallback tokens file  -->
+                    <StackPanel Spacing="4" ToolTip.Tip="{Binding LocalizationManager.TokenFilePathTooltip}">
+                        <TextBlock Text="{Binding LocalizationManager.TokenFilePathLabel}" />
+                        <TextBox Text="{Binding TokenFilePath}" Theme="{DynamicResource SoloTextBox}">
+                            <TextBox.InnerRightContent>
+                                <Button
+                                    Margin="8,0,0,0"
+                                    Padding="4"
+                                    Command="{Binding ShowTokenFilePathPromptCommand}"
+                                    Theme="{DynamicResource MaterialFlatButton}">
+                                    <materialIcons:MaterialIcon
+                                        Width="20"
+                                        Height="20"
+                                        Kind="FileOutline" />
+                                </Button>
+                            </TextBox.InnerRightContent>
+                        </TextBox>
+                    </StackPanel>
 
                     <!--  Rate limit preference  -->
                     <DockPanel LastChildFill="False" ToolTip.Tip="{Binding LocalizationManager.RateLimitPreferenceTooltip}">

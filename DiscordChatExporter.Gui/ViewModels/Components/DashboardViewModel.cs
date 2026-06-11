@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -103,6 +104,26 @@ public partial class DashboardViewModel : ViewModelBase
     private async Task ShowSettingsAsync() =>
         await _dialogManager.ShowDialogAsync(_viewModelManager.GetSettingsViewModel());
 
+    private IReadOnlyList<string> GetTokens(string primaryToken)
+    {
+        var tokens = new List<string> { primaryToken };
+
+        var tokenFilePath = _settingsService.LastTokenFilePath;
+        if (!string.IsNullOrWhiteSpace(tokenFilePath) && File.Exists(tokenFilePath))
+        {
+            foreach (var line in File.ReadLines(tokenFilePath))
+            {
+                var token = line.Trim();
+                if (string.IsNullOrEmpty(token) || token.StartsWith('#'))
+                    continue;
+
+                tokens.Add(token);
+            }
+        }
+
+        return tokens.Distinct(StringComparer.Ordinal).ToArray();
+    }
+
     private bool CanPullGuilds() => !IsBusy && !string.IsNullOrWhiteSpace(Token);
 
     [RelayCommand(CanExecute = nameof(CanPullGuilds))]
@@ -122,7 +143,7 @@ public partial class DashboardViewModel : ViewModelBase
             AvailableChannels = null;
             SelectedChannels.Clear();
 
-            _discord = new DiscordClient(token, _settingsService.RateLimitPreference);
+            _discord = new DiscordClient(GetTokens(token), _settingsService.RateLimitPreference);
             _settingsService.LastToken = token;
 
             var guilds = await _discord.GetUserGuildsAsync();

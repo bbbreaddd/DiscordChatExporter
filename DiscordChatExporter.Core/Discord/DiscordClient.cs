@@ -18,20 +18,53 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Discord;
 
-public class DiscordClient(
-    string token,
-    RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll
-)
+public class DiscordClient
 {
+    private readonly IReadOnlyList<string> _tokens;
+    private readonly RateLimitPreference _rateLimitPreference;
     private readonly Uri _baseUri = new("https://discord.com/api/v10/", UriKind.Absolute);
-    private TokenKind? _resolvedTokenKind;
+
+    // Per-token state, indexed in parallel with `_tokens`
+    private readonly TokenKind?[] _resolvedTokenKinds;
+    private readonly bool[] _isTokenInvalid;
+
+    // Index of the token that should be tried first for the next request.
+    // Updated as requests succeed or fail so that subsequent requests don't
+    // repeatedly retry tokens that are known not to work for the active resource.
+    private int _activeTokenIndex;
+
+    public DiscordClient(
+        IReadOnlyList<string> tokens,
+        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll
+    )
+    {
+        if (tokens.Count <= 0)
+            throw new ArgumentException(
+                "At least one authentication token must be provided.",
+                nameof(tokens)
+            );
+
+        _tokens = tokens;
+        _rateLimitPreference = rateLimitPreference;
+        _resolvedTokenKinds = new TokenKind?[tokens.Count];
+        _isTokenInvalid = new bool[tokens.Count];
+    }
+
+    public DiscordClient(
+        string token,
+        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll
+    )
+        : this([token], rateLimitPreference) { }
 
     private async ValueTask<HttpResponseMessage> GetResponseAsync(
         string url,
+        int tokenIndex,
         TokenKind tokenKind,
         CancellationToken cancellationToken = default
     )
     {
+        var token = _tokens[tokenIndex];
+
         return await Http.ResponseResiliencePipeline.ExecuteAsync(
             async innerCancellationToken =>
             {
@@ -55,7 +88,7 @@ public class DiscordClient(
                 // The user may choose to ignore the advisory rate limits and only retry on hard rate limits,
                 // if they want to prioritize speed over compliance (and safety of their account/bot).
                 // https://github.com/Tyrrrz/DiscordChatExporter/issues/1021
-                if (rateLimitPreference.IsRespectedFor(tokenKind))
+                if (_rateLimitPreference.IsRespectedFor(tokenKind))
                 {
                     var remainingRequestCount = response
                         .Headers.TryGetValue("X-RateLimit-Remaining")
@@ -93,45 +126,122 @@ public class DiscordClient(
         );
     }
 
-    private async ValueTask<TokenKind> ResolveTokenKindAsync(
+    // Resolves the token kind for the token at the specified index, or returns null if that
+    // token has been determined to be invalid altogether (i.e. not a valid user or bot token).
+    private async ValueTask<TokenKind?> ResolveTokenKindAsync(
+        int tokenIndex,
         CancellationToken cancellationToken = default
     )
     {
-        if (_resolvedTokenKind is not null)
-            return _resolvedTokenKind.Value;
+        if (_isTokenInvalid[tokenIndex])
+            return null;
+
+        if (_resolvedTokenKinds[tokenIndex] is { } resolvedTokenKind)
+            return resolvedTokenKind;
 
         // Try authenticating as a user
         using var userResponse = await GetResponseAsync(
             "users/@me",
+            tokenIndex,
             TokenKind.User,
             cancellationToken
         );
 
         if (userResponse.StatusCode != HttpStatusCode.Unauthorized)
-            return (_resolvedTokenKind = TokenKind.User).Value;
+            return (_resolvedTokenKinds[tokenIndex] = TokenKind.User).Value;
 
         // Try authenticating as a bot
         using var botResponse = await GetResponseAsync(
             "users/@me",
+            tokenIndex,
             TokenKind.Bot,
             cancellationToken
         );
 
         if (botResponse.StatusCode != HttpStatusCode.Unauthorized)
-            return (_resolvedTokenKind = TokenKind.Bot).Value;
+            return (_resolvedTokenKinds[tokenIndex] = TokenKind.Bot).Value;
 
-        throw new DiscordChatExporterException("Authentication token is invalid.", true);
+        _isTokenInvalid[tokenIndex] = true;
+        return null;
     }
 
+    // Resolves the token kind of the token that's currently expected to be used for requests.
+    // This is only meaningful to call after at least one request has already been made,
+    // because that's what determines which token is "active".
+    private async ValueTask<TokenKind> ResolveActiveTokenKindAsync(
+        CancellationToken cancellationToken = default
+    ) =>
+        await ResolveTokenKindAsync(_activeTokenIndex, cancellationToken)
+        ?? throw new DiscordChatExporterException("Authentication token is invalid.", true);
+
+    // Sends a request using one of the provided tokens, automatically falling back to the
+    // other tokens if the active one turns out to be invalid, lacks access to the requested
+    // resource, or is being persistently rate limited.
     private async ValueTask<HttpResponseMessage> GetResponseAsync(
         string url,
         CancellationToken cancellationToken = default
-    ) =>
-        await GetResponseAsync(
-            url,
-            await ResolveTokenKindAsync(cancellationToken),
-            cancellationToken
+    )
+    {
+        HttpResponseMessage? lastResponse = null;
+
+        for (var attempt = 0; attempt < _tokens.Count; attempt++)
+        {
+            var tokenIndex = (_activeTokenIndex + attempt) % _tokens.Count;
+
+            var tokenKind = await ResolveTokenKindAsync(tokenIndex, cancellationToken);
+
+            // This token is permanently invalid, try the next one
+            if (tokenKind is null)
+                continue;
+
+            var response = await GetResponseAsync(
+                url,
+                tokenIndex,
+                tokenKind.Value,
+                cancellationToken
+            );
+
+            // The token was valid before, but has since been revoked.
+            // Remember that and try the next one.
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                _isTokenInvalid[tokenIndex] = true;
+                lastResponse?.Dispose();
+                lastResponse = response;
+                continue;
+            }
+
+            // The active account doesn't have access to this resource, or is being rate
+            // limited hard enough that even the resilience pipeline couldn't recover.
+            // If there's another token left to try, see if it fares better with this
+            // specific request, without giving up on the current token entirely.
+            var isFallbackEligible =
+                response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests;
+
+            if (isFallbackEligible && attempt < _tokens.Count - 1)
+            {
+                lastResponse?.Dispose();
+                lastResponse = response;
+                continue;
+            }
+
+            // This token produced a usable response (or it's the last one we can try),
+            // so prefer it for subsequent requests.
+            _activeTokenIndex = tokenIndex;
+            lastResponse?.Dispose();
+            return response;
+        }
+
+        if (lastResponse is not null)
+            return lastResponse;
+
+        throw new DiscordChatExporterException(
+            _tokens.Count == 1
+                ? "Authentication token is invalid."
+                : "All provided authentication tokens are invalid.",
+            true
         );
+    }
 
     private async ValueTask<JsonElement> GetJsonResponseAsync(
         string url,
@@ -198,7 +308,7 @@ public class DiscordClient(
         CancellationToken cancellationToken = default
     )
     {
-        if (await ResolveTokenKindAsync(cancellationToken) != TokenKind.Bot)
+        if (await ResolveActiveTokenKindAsync(cancellationToken) != TokenKind.Bot)
             return;
 
         var application = await GetApplicationAsync(cancellationToken);
@@ -452,7 +562,7 @@ public class DiscordClient(
         var seenThreadIds = new HashSet<Snowflake>();
 
         // User accounts can only fetch threads using the search endpoint
-        if (await ResolveTokenKindAsync(cancellationToken) == TokenKind.User)
+        if (await ResolveActiveTokenKindAsync(cancellationToken) == TokenKind.User)
         {
             foreach (var channel in filteredChannels)
             {

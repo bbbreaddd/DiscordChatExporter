@@ -49,6 +49,9 @@ public partial class SettingsService()
     public partial string? LastToken { get; set; }
 
     [ObservableProperty]
+    public partial string? LastTokenFilePath { get; set; }
+
+    [ObservableProperty]
     public partial ExportFormat LastExportFormat { get; set; } = ExportFormat.HtmlDark;
 
     [ObservableProperty]

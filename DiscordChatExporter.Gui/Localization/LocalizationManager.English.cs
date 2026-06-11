@@ -56,6 +56,10 @@ public partial class LocalizationManager
                 Save the last used token to a file so that it can be persisted between sessions.
                 **Warning**: although the token is stored with encryption, it may still be recovered by an attacker who has access to your system.
                 """,
+            [nameof(TokenFilePathLabel)] = "Fallback tokens file",
+            [nameof(TokenFilePathTooltip)] =
+                "Path to a file containing additional authentication tokens, one per line. "
+                + "If a request fails because the current account is invalid, lacks access, or is rate limited, the next token from this file will be tried.",
             [nameof(RateLimitPreferenceLabel)] = "Rate limit preference",
             [nameof(RateLimitPreferenceTooltip)] =
                 "Whether to respect advisory rate limits. If disabled, only hard rate limits (i.e. 429 responses) will be respected.",

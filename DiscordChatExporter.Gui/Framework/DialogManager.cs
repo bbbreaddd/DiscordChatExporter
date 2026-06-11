@@ -72,6 +72,22 @@ public class DialogManager : IDisposable
         return file?.TryGetLocalPath() ?? file?.Path.ToString();
     }
 
+    public async Task<string?> PromptOpenFilePathAsync(
+        IReadOnlyList<FilePickerFileType>? fileTypes = null
+    )
+    {
+        var topLevel =
+            Application.Current?.ApplicationLifetime?.TryGetTopLevel()
+            ?? throw new ApplicationException("Could not find the top-level visual element.");
+
+        var files = await topLevel.StorageProvider.OpenFilePickerAsync(
+            new FilePickerOpenOptions { FileTypeFilter = fileTypes, AllowMultiple = false }
+        );
+
+        var file = files.FirstOrDefault();
+        return file?.TryGetLocalPath() ?? file?.Path.ToString();
+    }
+
     public async Task<string?> PromptDirectoryPathAsync(string defaultDirPath = "")
     {
         var topLevel =

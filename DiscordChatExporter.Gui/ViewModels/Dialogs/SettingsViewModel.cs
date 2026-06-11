@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using CommunityToolkit.Mvvm.Input;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Gui.Framework;
 using DiscordChatExporter.Gui.Localization;
@@ -12,21 +14,26 @@ namespace DiscordChatExporter.Gui.ViewModels.Dialogs;
 
 public class SettingsViewModel : DialogViewModelBase
 {
+    private readonly DialogManager _dialogManager;
     private readonly SettingsService _settingsService;
 
     private readonly IDisposable _eventSubscription;
 
     public SettingsViewModel(
+        DialogManager dialogManager,
         SettingsService settingsService,
         LocalizationManager localizationManager
     )
     {
+        _dialogManager = dialogManager;
         _settingsService = settingsService;
         LocalizationManager = localizationManager;
 
         _eventSubscription = Disposable.Merge(
             _settingsService.WatchAllProperties(OnAllPropertiesChanged)
         );
+
+        ShowTokenFilePathPromptCommand = new AsyncRelayCommand(ShowTokenFilePathPromptAsync);
     }
 
     public LocalizationManager LocalizationManager { get; }
@@ -60,6 +67,21 @@ public class SettingsViewModel : DialogViewModelBase
     {
         get => _settingsService.IsTokenPersisted;
         set => _settingsService.IsTokenPersisted = value;
+    }
+
+    public string? TokenFilePath
+    {
+        get => _settingsService.LastTokenFilePath;
+        set => _settingsService.LastTokenFilePath = value;
+    }
+
+    public IAsyncRelayCommand ShowTokenFilePathPromptCommand { get; }
+
+    private async Task ShowTokenFilePathPromptAsync()
+    {
+        var path = await _dialogManager.PromptOpenFilePathAsync();
+        if (!string.IsNullOrWhiteSpace(path))
+            TokenFilePath = path;
     }
 
     public IReadOnlyList<RateLimitPreference> AvailableRateLimitPreferences { get; } =

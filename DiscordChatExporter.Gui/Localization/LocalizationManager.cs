@@ -98,6 +98,8 @@ public partial class LocalizationManager
     public string AutoUpdateTooltip => Get();
     public string PersistTokenLabel => Get();
     public string PersistTokenTooltip => Get();
+    public string TokenFilePathLabel => Get();
+    public string TokenFilePathTooltip => Get();
     public string RateLimitPreferenceLabel => Get();
     public string RateLimitPreferenceTooltip => Get();
     public string ShowThreadsLabel => Get();
