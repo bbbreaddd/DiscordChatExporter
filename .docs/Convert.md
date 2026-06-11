@@ -92,10 +92,11 @@ Discord, a few things can't be reproduced perfectly:
   stale references.
 - Message flags (e.g. the "forwarded" badge) aren't stored in the JSON export, so they won't
   appear in the converted output.
-- For threads, the JSON export only stores the name/ID of the thread's parent channel under
-  `category`/`categoryId` (not that channel's own category). As a result, the "Channel:" header
-  in `PlainText`/`Csv` output, and the breadcrumb in `Html`, will show one fewer level than a
-  live export of the same thread.
+- For threads, the JSON export stores the name/ID of the thread's parent channel under
+  `category`/`categoryId` (not that channel's own category), with the parent channel's category
+  stored separately under `parentCategory`/`parentCategoryId`. JSON exports created before this
+  field was added won't have it, so the "Channel:" header in `PlainText`/`Csv` output, and the
+  breadcrumb in `Html`, will show one fewer level than a live export of the same thread.
 - Attachment, embed, and avatar URLs are copied as-is from the JSON. Discord's CDN URLs include
   a short-lived signature that expires (~24h after the original export), so links may no longer
   work by the time you run `convert`. Use `--media` to download a local copy instead.

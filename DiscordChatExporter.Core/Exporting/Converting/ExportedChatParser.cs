@@ -34,15 +34,40 @@ public static class ExportedChatParser
 
         var categoryName = json.GetPropertyOrNull("category")?.GetNonWhiteSpaceStringOrNull();
 
-        // The export schema only stores the immediate parent (category or parent channel for
-        // threads), so deeper hierarchies are not reconstructed.
+        var parentCategoryId = json.GetPropertyOrNull("parentCategoryId")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
+
+        var parentCategoryName = json.GetPropertyOrNull("parentCategory")
+            ?.GetNonWhiteSpaceStringOrNull();
+
+        // For threads, 'category'/'categoryId' refer to the parent channel, which may itself
+        // belong to a category, captured separately as 'parentCategory'/'parentCategoryId'.
+        // Exports created before this field existed won't have it, so the hierarchy will be
+        // one level shorter for threads in those files.
+        var grandparent =
+            parentCategoryId is not null
+                ? new Channel(
+                    parentCategoryId.Value,
+                    ChannelKind.GuildCategory,
+                    guildId,
+                    null,
+                    parentCategoryName ?? parentCategoryId.Value.ToString(),
+                    null,
+                    null,
+                    null,
+                    false,
+                    null
+                )
+                : null;
+
         var parent =
             categoryId is not null
                 ? new Channel(
                     categoryId.Value,
                     ChannelKind.GuildCategory,
                     guildId,
-                    null,
+                    grandparent,
                     categoryName ?? categoryId.Value.ToString(),
                     null,
                     null,

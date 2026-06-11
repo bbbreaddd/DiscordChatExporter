@@ -22,6 +22,12 @@ public class ConvertSpecs
         "sample-export.json"
     );
 
+    private static readonly string SampleThreadExportFilePath = Path.Combine(
+        AppContext.BaseDirectory,
+        "Data",
+        "sample-export-thread.json"
+    );
+
     [Fact]
     public async Task I_can_convert_a_JSON_export_to_the_plain_text_format()
     {
@@ -197,5 +203,28 @@ public class ConvertSpecs
         content.Should().NotContain("Hello world, this is a test message.");
         content.Should().Contain("Hey @Bobby, check this out!");
         content.Should().Contain("Exported 1 message(s)");
+    }
+
+    [Fact]
+    public async Task I_can_convert_a_JSON_export_of_a_thread_with_its_full_category_hierarchy()
+    {
+        // Arrange
+        using var file = TempFile.Create();
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [SampleThreadExportFilePath],
+            OutputPath = file.Path,
+            ExportFormat = ExportFormat.PlainText,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        var content = await File.ReadAllTextAsync(file.Path);
+
+        // Assert
+        content.Should().Contain("Channel: Text Channels / general / thread-topic");
+        content.Should().Contain("This is a thread message.");
     }
 }

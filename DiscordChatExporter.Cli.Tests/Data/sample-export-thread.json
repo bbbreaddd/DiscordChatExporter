@@ -1,0 +1,57 @@
+{
+  "guild": {
+    "id": "1063903591533404160",
+    "name": "Test Guild",
+    "iconUrl": "https://cdn.discordapp.com/embed/avatars/0.png"
+  },
+  "channel": {
+    "id": "1063903591533404180",
+    "type": "GuildPublicThread",
+    "categoryId": "1063903591533404161",
+    "category": "general",
+    "parentCategoryId": "1063903591533404162",
+    "parentCategory": "Text Channels",
+    "name": "thread-topic",
+    "topic": null,
+    "iconUrl": null
+  },
+  "dateRange": {
+    "after": null,
+    "before": null
+  },
+  "exportedAt": "2023-06-15T13:00:00+00:00",
+  "messages": [
+    {
+      "id": "1100000000000000004",
+      "type": "Default",
+      "timestamp": "2023-06-15T12:00:00+00:00",
+      "timestampEdited": null,
+      "callEndedTimestamp": null,
+      "isPinned": false,
+      "content": "This is a thread message.",
+      "author": {
+        "id": "1063903591533404163",
+        "name": "alice",
+        "discriminator": "0000",
+        "nickname": "Alice",
+        "color": "#FF5733",
+        "isBot": false,
+        "roles": [
+          {
+            "id": "1063903591533404170",
+            "name": "Member",
+            "color": "#FF5733",
+            "position": 1
+          }
+        ],
+        "avatarUrl": "https://cdn.discordapp.com/embed/avatars/1.png"
+      },
+      "attachments": [],
+      "embeds": [],
+      "stickers": [],
+      "reactions": [],
+      "mentions": []
+    }
+  ],
+  "messageCount": 1
+}

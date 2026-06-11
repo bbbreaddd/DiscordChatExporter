@@ -399,6 +399,15 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteString("categoryId", Context.Request.Channel.Parent?.Id.ToString());
         _writer.WriteString("category", Context.Request.Channel.Parent?.Name);
 
+        // For threads, the parent channel above may itself belong to a category. Store it
+        // separately so that the full hierarchy can be reconstructed later (e.g. by the
+        // 'convert' command).
+        _writer.WriteString(
+            "parentCategoryId",
+            Context.Request.Channel.Parent?.Parent?.Id.ToString()
+        );
+        _writer.WriteString("parentCategory", Context.Request.Channel.Parent?.Parent?.Name);
+
         _writer.WriteString("name", Context.Request.Channel.Name);
         _writer.WriteString("topic", Context.Request.Channel.Topic);
 
