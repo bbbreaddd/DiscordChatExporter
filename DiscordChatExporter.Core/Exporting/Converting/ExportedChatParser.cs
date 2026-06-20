@@ -23,7 +23,9 @@ public static class ExportedChatParser
     private static Channel ParseChannel(JsonElement json, Snowflake guildId)
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
-        var kind = json.GetProperty("type").GetNonNullString().Pipe(s => Enum.Parse<ChannelKind>(s));
+        var kind = json.GetProperty("type")
+            .GetNonNullString()
+            .Pipe(s => Enum.Parse<ChannelKind>(s));
         var name = json.GetProperty("name").GetNonNullString();
         var topic = json.GetPropertyOrNull("topic")?.GetStringOrNull();
         var iconUrl = json.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull();
@@ -45,37 +47,35 @@ public static class ExportedChatParser
         // belong to a category, captured separately as 'parentCategory'/'parentCategoryId'.
         // Exports created before this field existed won't have it, so the hierarchy will be
         // one level shorter for threads in those files.
-        var grandparent =
-            parentCategoryId is not null
-                ? new Channel(
-                    parentCategoryId.Value,
-                    ChannelKind.GuildCategory,
-                    guildId,
-                    null,
-                    parentCategoryName ?? parentCategoryId.Value.ToString(),
-                    null,
-                    null,
-                    null,
-                    false,
-                    null
-                )
-                : null;
+        var grandparent = parentCategoryId is not null
+            ? new Channel(
+                parentCategoryId.Value,
+                ChannelKind.GuildCategory,
+                guildId,
+                null,
+                parentCategoryName ?? parentCategoryId.Value.ToString(),
+                null,
+                null,
+                null,
+                false,
+                null
+            )
+            : null;
 
-        var parent =
-            categoryId is not null
-                ? new Channel(
-                    categoryId.Value,
-                    ChannelKind.GuildCategory,
-                    guildId,
-                    grandparent,
-                    categoryName ?? categoryId.Value.ToString(),
-                    null,
-                    null,
-                    null,
-                    false,
-                    null
-                )
-                : null;
+        var parent = categoryId is not null
+            ? new Channel(
+                categoryId.Value,
+                ChannelKind.GuildCategory,
+                guildId,
+                grandparent,
+                categoryName ?? categoryId.Value.ToString(),
+                null,
+                null,
+                null,
+                false,
+                null
+            )
+            : null;
 
         // LastMessageId isn't part of the export schema
         return new Channel(id, kind, guildId, parent, name, null, iconUrl, topic, false, null);
@@ -123,8 +123,7 @@ public static class ExportedChatParser
         CollectMember(messageJson.GetProperty("author"), members, roles);
 
         foreach (
-            var userJson in messageJson.GetPropertyOrNull("mentions")?.EnumerateArrayOrNull()
-                ?? []
+            var userJson in messageJson.GetPropertyOrNull("mentions")?.EnumerateArrayOrNull() ?? []
         )
             CollectMember(userJson, members, roles);
 

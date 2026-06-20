@@ -52,7 +52,7 @@ public abstract class DiscordCommandBase : ICommand
         var tokens = new List<string>();
 
         if (!string.IsNullOrWhiteSpace(Token))
-            tokens.Add(Token.Trim());
+            tokens.Add(Token.Trim().Trim('"'));
 
         if (!string.IsNullOrWhiteSpace(TokenFile))
         {
@@ -61,8 +61,9 @@ public abstract class DiscordCommandBase : ICommand
 
             foreach (var line in File.ReadLines(TokenFile))
             {
-                var token = line.Trim();
-                if (string.IsNullOrEmpty(token) || token.StartsWith('#'))
+                var parts = line.Split('#', 2);
+                var token = parts[0].Trim().Trim('"');
+                if (string.IsNullOrEmpty(token))
                     continue;
 
                 tokens.Add(token);

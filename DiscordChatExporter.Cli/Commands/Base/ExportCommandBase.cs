@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
@@ -137,6 +138,12 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool IsUtcNormalizationEnabled { get; set; } = false;
 
     [CommandOption(
+        "incremental",
+        Description = "Append new messages to an existing JSON export file instead of overwriting it."
+    )]
+    public bool IsIncremental { get; set; } = false;
+
+    [CommandOption(
         "fuck-russia",
         EnvironmentVariable = "FUCK_RUSSIA",
         Description = "Don't print the Support Ukraine message to the console.",
@@ -165,53 +172,35 @@ public abstract class ExportCommandBase : DiscordCommandBase
             throw new CommandException("Option --media-dir cannot be used without --media.");
         }
 
-        var unwrappedChannels = new List<Channel>(channels);
-
-        // Unwrap threads
-        if (ThreadInclusionMode != ThreadInclusionMode.None)
+        if (IsIncremental && ExportFormat != ExportFormat.Json)
         {
-            await console.Output.WriteLineAsync("Fetching threads...");
+            throw new CommandException(
+                "Option --incremental can only be used with JSON format. "
+                    + "Use the convert command to get other formats."
+            );
+        }
 
-            var fetchedThreadsCount = 0;
-            await console
-                .CreateStatusTicker()
-                .StartAsync(
-                    "...",
-                    async ctx =>
-                    {
-                        await foreach (
-                            var thread in Discord.GetChannelThreadsAsync(
-                                channels,
-                                ThreadInclusionMode == ThreadInclusionMode.All,
-                                Before,
-                                After,
-                                cancellationToken
-                            )
-                        )
-                        {
-                            unwrappedChannels.Add(thread);
-
-                            ctx.Status(Markup.Escape($"Fetched '{thread.GetHierarchicalName()}'."));
-
-                            fetchedThreadsCount++;
-                        }
-                    }
-                );
-
-            // Remove forums, as they cannot be exported directly and their constituent threads
-            // have already been fetched.
-            unwrappedChannels.RemoveAll(channel => channel.Kind == ChannelKind.GuildForum);
-
-            await console.Output.WriteLineAsync($"Fetched {fetchedThreadsCount} thread(s).");
+        ExportManifest? manifest = null;
+        string? manifestDir = null;
+        if (IsIncremental)
+        {
+            manifestDir =
+                Directory.Exists(OutputPath) || Path.EndsInDirectorySeparator(OutputPath)
+                    ? OutputPath
+                    : Path.GetDirectoryName(OutputPath) ?? Directory.GetCurrentDirectory();
+            manifest = await ExportManifest.LoadAsync(manifestDir);
         }
 
         // Make sure the user does not try to export multiple channels into one file.
-        // Output path must either be a directory or contain template tokens for this to work.
+        // With thread inclusion enabled or multiple input channels we know there will be
+        // more than one output, so the output path must be a directory or template.
         // https://github.com/Tyrrrz/DiscordChatExporter/issues/799
         // https://github.com/Tyrrrz/DiscordChatExporter/issues/917
+        var mightExportMultiple =
+            channels.Count > 1 || ThreadInclusionMode != ThreadInclusionMode.None;
         var isValidOutputPath =
-            // Anything is valid when exporting a single channel
-            unwrappedChannels.Count <= 1
+            // Anything is valid when we know there's at most one channel
+            !mightExportMultiple
             // When using template tokens, assume the user knows what they're doing
             || OutputPath.Contains('%')
             // Otherwise, require an existing directory or an unambiguous directory path
@@ -227,11 +216,52 @@ public abstract class ExportCommandBase : DiscordCommandBase
             );
         }
 
+        // Build a streaming channel sequence that yields regular channels first, then
+        // discovers and yields threads lazily as the API returns them.
+        // This replaces the previous collect-all-threads-then-export pattern:
+        // Parallel.ForEachAsync accepts IAsyncEnumerable<T> and starts exporting each
+        // channel/thread as soon as it appears, rather than waiting for all 17k threads
+        // to be held in memory before any export begins.
+        var fetchedThreadsCount = 0;
+
+        async IAsyncEnumerable<Channel> GetAllChannelsAsync()
+        {
+            // Non-forum regular channels are available immediately
+            foreach (var ch in channels)
+            {
+                if (ch.Kind != ChannelKind.GuildForum)
+                    yield return ch;
+            }
+
+            // Threads are discovered lazily, one API page at a time
+            if (ThreadInclusionMode != ThreadInclusionMode.None)
+            {
+                await foreach (
+                    var thread in Discord.GetChannelThreadsAsync(
+                        channels,
+                        ThreadInclusionMode == ThreadInclusionMode.All,
+                        Before,
+                        After,
+                        manifest,
+                        cancellationToken
+                    )
+                )
+                {
+                    // Forums cannot be exported directly; their threads are already yielded
+                    if (thread.Kind != ChannelKind.GuildForum)
+                        yield return thread;
+
+                    fetchedThreadsCount++;
+                }
+            }
+        }
+
         // Export
         var errorsByChannel = new ConcurrentDictionary<Channel, string>();
         var warningsByChannel = new ConcurrentDictionary<Channel, string>();
+        var totalChannelCount = 0;
 
-        await console.Output.WriteLineAsync($"Exporting {unwrappedChannels.Count} channel(s)...");
+        await console.Output.WriteLineAsync("Exporting channels...");
         await console
             .CreateProgressTicker()
             .HideCompleted(
@@ -243,7 +273,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
             .StartAsync(async ctx =>
             {
                 await Parallel.ForEachAsync(
-                    unwrappedChannels,
+                    GetAllChannelsAsync(),
                     new ParallelOptions
                     {
                         MaxDegreeOfParallelism = Math.Max(1, ParallelLimit),
@@ -251,6 +281,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                     },
                     async (channel, innerCancellationToken) =>
                     {
+                        Interlocked.Increment(ref totalChannelCount);
                         try
                         {
                             await ctx.StartTaskAsync(
@@ -277,11 +308,13 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                         ShouldDownloadAssets,
                                         ShouldReuseAssets,
                                         Locale,
-                                        IsUtcNormalizationEnabled
+                                        IsUtcNormalizationEnabled,
+                                        IsIncremental
                                     );
 
                                     await Exporter.ExportChannelAsync(
                                         request,
+                                        manifest,
                                         progress.ToPercentageBased(),
                                         innerCancellationToken
                                     );
@@ -300,11 +333,19 @@ public abstract class ExportCommandBase : DiscordCommandBase
                 );
             });
 
+        if (ThreadInclusionMode != ThreadInclusionMode.None)
+            await console.Output.WriteLineAsync($"Fetched {fetchedThreadsCount} thread(s).");
+
+        if (manifest is not null && manifestDir is not null)
+        {
+            await manifest.SaveAsync(manifestDir);
+        }
+
         // Print the result
         using (console.WithForegroundColor(ConsoleColor.White))
         {
             await console.Output.WriteLineAsync(
-                $"Successfully exported {unwrappedChannels.Count - errorsByChannel.Count} channel(s)."
+                $"Successfully exported {totalChannelCount - errorsByChannel.Count} channel(s)."
             );
         }
 
@@ -352,12 +393,20 @@ public abstract class ExportCommandBase : DiscordCommandBase
 
         // Fail the command only if ALL channels failed to export.
         // If only some channels failed to export, it's okay.
-        if (errorsByChannel.Count >= unwrappedChannels.Count)
+        if (errorsByChannel.Count >= totalChannelCount)
             throw new CommandException("Export failed.");
     }
 
     public override async ValueTask ExecuteAsync(IConsole console)
     {
+        if (IsIncremental && ExportFormat != ExportFormat.Json)
+        {
+            throw new CommandException(
+                "Option --incremental can only be used with JSON format. "
+                    + "Use the convert command to get other formats."
+            );
+        }
+
         // Support Ukraine callout
         if (!IsUkraineSupportMessageDisabled)
         {

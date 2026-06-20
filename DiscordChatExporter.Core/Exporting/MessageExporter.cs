@@ -6,10 +6,13 @@ using DiscordChatExporter.Core.Discord.Data;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
+internal partial class MessageExporter(ExportContext context, string? outputFilePathOverride = null)
+    : IAsyncDisposable
 {
     private int _partitionIndex;
     private MessageWriter? _writer;
+    private string? _activeFilePath;
+    private string? _activeTempFilePath;
 
     public long MessagesExported { get; private set; }
 
@@ -35,9 +38,14 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
             return _writer;
 
         Directory.CreateDirectory(context.Request.OutputDirPath);
-        var filePath = GetPartitionFilePath(context.Request.OutputFilePath, _partitionIndex);
+        var basePath = outputFilePathOverride ?? context.Request.OutputFilePath;
+        var filePath = GetPartitionFilePath(basePath, _partitionIndex);
+        var tempFilePath = filePath + ".tmp";
 
-        var writer = CreateMessageWriter(filePath, context.Request.Format, context);
+        _activeFilePath = filePath;
+        _activeTempFilePath = tempFilePath;
+
+        var writer = CreateMessageWriter(tempFilePath, context.Request.Format, context);
         await writer.WritePreambleAsync(cancellationToken);
 
         return _writer = writer;
@@ -47,6 +55,9 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
     {
         if (_writer is not null)
         {
+            var filePath = _activeFilePath;
+            var tempFilePath = _activeTempFilePath;
+
             try
             {
                 await _writer.WritePostambleAsync(cancellationToken);
@@ -56,6 +67,13 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
             {
                 await _writer.DisposeAsync();
                 _writer = null;
+                _activeFilePath = null;
+                _activeTempFilePath = null;
+            }
+
+            if (tempFilePath is not null && filePath is not null && File.Exists(tempFilePath))
+            {
+                File.Move(tempFilePath, filePath, true);
             }
         }
     }
@@ -82,7 +100,7 @@ internal partial class MessageExporter(ExportContext context) : IAsyncDisposable
 
 internal partial class MessageExporter
 {
-    private static string GetPartitionFilePath(string baseFilePath, int partitionIndex)
+    internal static string GetPartitionFilePath(string baseFilePath, int partitionIndex)
     {
         // First partition, don't change the file name
         if (partitionIndex <= 0)

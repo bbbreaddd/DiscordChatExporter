@@ -17,11 +17,13 @@ public partial class ExportRequest
 
     public Channel Channel { get; }
 
-    public string OutputFilePath { get; }
+    public string OutputFilePath { get; private set; }
 
-    public string OutputDirPath { get; }
+    public string OutputDirPath { get; private set; }
 
     public string AssetsDirPath { get; }
+
+    public string BaseOutputDirPath { get; }
 
     public ExportFormat Format { get; }
 
@@ -47,6 +49,8 @@ public partial class ExportRequest
 
     public bool IsUtcNormalizationEnabled { get; }
 
+    public bool IsIncremental { get; }
+
     public ExportRequest(
         Guild guild,
         Channel channel,
@@ -62,7 +66,8 @@ public partial class ExportRequest
         bool shouldDownloadAssets,
         bool shouldReuseAssets,
         string? locale,
-        bool isUtcNormalizationEnabled
+        bool isUtcNormalizationEnabled,
+        bool isIncremental = false
     )
     {
         Guild = guild;
@@ -78,6 +83,12 @@ public partial class ExportRequest
         ShouldReuseAssets = shouldReuseAssets;
         Locale = locale;
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
+        IsIncremental = isIncremental;
+
+        BaseOutputDirPath =
+            Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)
+                ? outputPath
+                : Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory();
 
         OutputFilePath = GetOutputBaseFilePath(Guild, Channel, outputPath, Format, After, Before);
 
@@ -88,6 +99,18 @@ public partial class ExportRequest
             : $"{OutputFilePath}_Files{Path.DirectorySeparatorChar}";
 
         CultureInfo = Locale?.Pipe(CultureInfo.GetCultureInfo);
+    }
+
+    // Re-points this request at a pre-existing export file for the same channel, found under
+    // a different name (e.g. because the channel or one of its parent categories was renamed
+    // on Discord since the last export). This is the fallback used when that old file can't be
+    // renamed to the freshly-computed path (e.g. because something else already occupies it);
+    // it keeps writing to the file the channel's history is already in, instead of starting a
+    // new, disconnected file under the freshly-computed name.
+    internal void RedirectOutputFilePath(string existingOutputFilePath)
+    {
+        OutputFilePath = existingOutputFilePath;
+        OutputDirPath = Path.GetDirectoryName(OutputFilePath)!;
     }
 }
 

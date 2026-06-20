@@ -10,6 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exceptions;
+using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Utils;
 using Gress;
 using JsonExtensions.Http;
@@ -440,7 +441,7 @@ public class DiscordClient
                 includeArchived,
                 before,
                 after,
-                cancellationToken
+                cancellationToken: cancellationToken
             )
         )
         {
@@ -539,6 +540,7 @@ public class DiscordClient
         bool includeArchived = false,
         Snowflake? before = null,
         Snowflake? after = null,
+        ExportManifest? manifest = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
@@ -560,64 +562,101 @@ public class DiscordClient
         // from active to archived between the two separate API calls used to fetch threads.
         // https://github.com/Tyrrrz/DiscordChatExporter/issues/1433
         var seenThreadIds = new HashSet<Snowflake>();
+        var threadsList = new List<Channel>();
 
         // User accounts can only fetch threads using the search endpoint
         if (await ResolveActiveTokenKindAsync(cancellationToken) == TokenKind.User)
         {
-            foreach (var channel in filteredChannels)
-            {
-                // Either include both active and archived threads, or only active threads
-                foreach (
-                    var isArchived in includeArchived ? new[] { false, true } : new[] { false }
-                )
+            await Parallel.ForEachAsync(
+                filteredChannels,
+                new ParallelOptions
                 {
-                    // Offset is just the index of the last thread in the previous batch
-                    var currentOffset = 0;
-                    while (true)
+                    MaxDegreeOfParallelism = 8,
+                    CancellationToken = cancellationToken,
+                },
+                async (channel, ct) =>
+                {
+                    // Either include both active and archived threads, or only active threads
+                    foreach (
+                        var isArchived in includeArchived ? new[] { false, true } : new[] { false }
+                    )
                     {
-                        var url = new UrlBuilder()
-                            .SetPath($"channels/{channel.Id}/threads/search")
-                            .SetQueryParameter("sort_by", "last_message_time")
-                            .SetQueryParameter("sort_order", "desc")
-                            .SetQueryParameter("archived", isArchived.ToString().ToLowerInvariant())
-                            .SetQueryParameter("offset", currentOffset.ToString())
-                            .Build();
-
-                        // Can be null on channels that the user cannot access or channels without threads
-                        var response = await TryGetJsonResponseAsync(url, cancellationToken);
-                        if (response is null)
-                            break;
-
-                        var breakOuter = false;
-
-                        foreach (
-                            var threadJson in response.Value.GetProperty("threads").EnumerateArray()
-                        )
+                        // Offset is just the index of the last thread in the previous batch
+                        var currentOffset = 0;
+                        while (true)
                         {
-                            var thread = Channel.Parse(threadJson, channel);
+                            var url = new UrlBuilder()
+                                .SetPath($"channels/{channel.Id}/threads/search")
+                                .SetQueryParameter("sort_by", "last_message_time")
+                                .SetQueryParameter("sort_order", "desc")
+                                .SetQueryParameter(
+                                    "archived",
+                                    isArchived.ToString().ToLowerInvariant()
+                                )
+                                .SetQueryParameter("offset", currentOffset.ToString())
+                                .Build();
 
-                            // If the 'after' boundary is specified, we can break early,
-                            // because threads are sorted by last message timestamp.
-                            if (after is not null && !thread.MayHaveMessagesAfter(after.Value))
-                            {
-                                breakOuter = true;
+                            // Can be null on channels that the user cannot access or channels without threads
+                            var response = await TryGetJsonResponseAsync(url, ct);
+                            if (response is null)
                                 break;
+
+                            var breakOuter = false;
+
+                            var threadsJson = response
+                                .Value.GetProperty("threads")
+                                .EnumerateArray()
+                                .ToArray();
+                            if (threadsJson.Length == 0)
+                                break;
+
+                            foreach (var threadJson in threadsJson)
+                            {
+                                var thread = Channel.Parse(threadJson, channel);
+                                currentOffset++;
+
+                                // If the 'after' boundary is specified, we can break early,
+                                // because threads are sorted by last message timestamp.
+                                if (after is not null && !thread.MayHaveMessagesAfter(after.Value))
+                                {
+                                    breakOuter = true;
+                                    break;
+                                }
+
+                                lock (seenThreadIds)
+                                {
+                                    var isAlreadyExported =
+                                        manifest?.Channels.TryGetValue(
+                                            thread.Id.ToString(),
+                                            out var entry
+                                        ) == true
+                                        && entry.IsArchived;
+                                    if (isAlreadyExported)
+                                    {
+                                        if (isArchived)
+                                            breakOuter = true;
+                                        continue;
+                                    }
+
+                                    if (seenThreadIds.Add(thread.Id))
+                                    {
+                                        lock (threadsList)
+                                        {
+                                            threadsList.Add(thread);
+                                        }
+                                    }
+                                }
                             }
 
-                            if (seenThreadIds.Add(thread.Id))
-                                yield return thread;
+                            if (breakOuter)
+                                break;
 
-                            currentOffset++;
+                            if (!response.Value.GetProperty("has_more").GetBoolean())
+                                break;
                         }
-
-                        if (breakOuter)
-                            break;
-
-                        if (!response.Value.GetProperty("has_more").GetBoolean())
-                            break;
                     }
                 }
-            }
+            );
         }
         // Bot accounts can only fetch threads using the threads endpoint
         else
@@ -648,8 +687,16 @@ public class DiscordClient
                     {
                         var thread = Channel.Parse(threadJson, parent);
 
-                        if (seenThreadIds.Add(thread.Id))
-                            yield return thread;
+                        lock (seenThreadIds)
+                        {
+                            if (seenThreadIds.Add(thread.Id))
+                            {
+                                lock (threadsList)
+                                {
+                                    threadsList.Add(thread);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -657,51 +704,91 @@ public class DiscordClient
             // Archived threads
             if (includeArchived)
             {
-                foreach (var channel in filteredChannels)
-                {
-                    foreach (var archiveType in new[] { "public", "private" })
+                await Parallel.ForEachAsync(
+                    filteredChannels,
+                    new ParallelOptions
                     {
-                        // This endpoint parameter expects an ISO8601 timestamp, not a snowflake
-                        var currentBefore = before
-                            ?.ToDate()
-                            .ToString("O", CultureInfo.InvariantCulture);
-
-                        while (true)
+                        MaxDegreeOfParallelism = 8,
+                        CancellationToken = cancellationToken,
+                    },
+                    async (channel, ct) =>
+                    {
+                        foreach (var archiveType in new[] { "public", "private" })
                         {
-                            // Threads are sorted by archive timestamp, not by last message timestamp
-                            var url = new UrlBuilder()
-                                .SetPath($"channels/{channel.Id}/threads/archived/{archiveType}")
-                                .SetQueryParameter("before", currentBefore)
-                                .Build();
+                            // This endpoint parameter expects an ISO8601 timestamp, not a snowflake
+                            var currentBefore = before
+                                ?.ToDate()
+                                .ToString("O", CultureInfo.InvariantCulture);
 
-                            // Can be null on certain channels
-                            var response = await TryGetJsonResponseAsync(url, cancellationToken);
-                            if (response is null)
-                                break;
-
-                            foreach (
-                                var threadJson in response
-                                    .Value.GetProperty("threads")
-                                    .EnumerateArray()
-                            )
+                            while (true)
                             {
-                                var thread = Channel.Parse(threadJson, channel);
+                                // Threads are sorted by archive timestamp, not by last message timestamp
+                                var url = new UrlBuilder()
+                                    .SetPath(
+                                        $"channels/{channel.Id}/threads/archived/{archiveType}"
+                                    )
+                                    .SetQueryParameter("before", currentBefore)
+                                    .Build();
 
-                                currentBefore = threadJson
-                                    .GetProperty("thread_metadata")
-                                    .GetProperty("archive_timestamp")
-                                    .GetString();
+                                // Can be null on certain channels
+                                var response = await TryGetJsonResponseAsync(url, ct);
+                                if (response is null)
+                                    break;
 
-                                if (seenThreadIds.Add(thread.Id))
-                                    yield return thread;
+                                var breakOuter = false;
+
+                                foreach (
+                                    var threadJson in response
+                                        .Value.GetProperty("threads")
+                                        .EnumerateArray()
+                                )
+                                {
+                                    var thread = Channel.Parse(threadJson, channel);
+
+                                    currentBefore = threadJson
+                                        .GetProperty("thread_metadata")
+                                        .GetProperty("archive_timestamp")
+                                        .GetString();
+
+                                    lock (seenThreadIds)
+                                    {
+                                        var isAlreadyExported =
+                                            manifest?.Channels.TryGetValue(
+                                                thread.Id.ToString(),
+                                                out var entry
+                                            ) == true
+                                            && entry.IsArchived;
+                                        if (isAlreadyExported)
+                                        {
+                                            breakOuter = true;
+                                            break;
+                                        }
+
+                                        if (seenThreadIds.Add(thread.Id))
+                                        {
+                                            lock (threadsList)
+                                            {
+                                                threadsList.Add(thread);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (breakOuter)
+                                    break;
+
+                                if (!response.Value.GetProperty("has_more").GetBoolean())
+                                    break;
                             }
-
-                            if (!response.Value.GetProperty("has_more").GetBoolean())
-                                break;
                         }
                     }
-                }
+                );
             }
+        }
+
+        foreach (var thread in threadsList)
+        {
+            yield return thread;
         }
     }
 

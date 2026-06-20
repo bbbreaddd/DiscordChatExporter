@@ -135,11 +135,17 @@ internal static class ExportedMessageParser
         var footer = json.GetPropertyOrNull("footer")?.Pipe(ParseEmbedFooter);
 
         var images =
-            json.GetPropertyOrNull("images")?.EnumerateArrayOrNull()?.Select(ParseEmbedImage).ToArray()
+            json.GetPropertyOrNull("images")
+                ?.EnumerateArrayOrNull()
+                ?.Select(ParseEmbedImage)
+                .ToArray()
             ?? [];
 
         var fields =
-            json.GetPropertyOrNull("fields")?.EnumerateArrayOrNull()?.Select(ParseEmbedField).ToArray()
+            json.GetPropertyOrNull("fields")
+                ?.EnumerateArrayOrNull()
+                ?.Select(ParseEmbedField)
+                .ToArray()
             ?? [];
 
         // The export schema does not capture the embed's original type (rich/image/video/etc.),
@@ -227,7 +233,10 @@ internal static class ExportedMessageParser
             ?? [];
 
         var stickers =
-            json.GetPropertyOrNull("stickers")?.EnumerateArrayOrNull()?.Select(ParseSticker).ToArray()
+            json.GetPropertyOrNull("stickers")
+                ?.EnumerateArrayOrNull()
+                ?.Select(ParseSticker)
+                .ToArray()
             ?? [];
 
         return new MessageSnapshot(
@@ -252,7 +261,9 @@ internal static class ExportedMessageParser
     public static Message ParseMessage(JsonElement json)
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
-        var kind = json.GetProperty("type").GetNonNullString().Pipe(s => Enum.Parse<MessageKind>(s));
+        var kind = json.GetProperty("type")
+            .GetNonNullString()
+            .Pipe(s => Enum.Parse<MessageKind>(s));
 
         var timestamp = json.GetProperty("timestamp").GetDateTimeOffset();
         var editedTimestamp = json.GetPropertyOrNull("timestampEdited")?.GetDateTimeOffsetOrNull();
@@ -288,7 +299,10 @@ internal static class ExportedMessageParser
             ?? [];
 
         var stickers =
-            json.GetPropertyOrNull("stickers")?.EnumerateArrayOrNull()?.Select(ParseSticker).ToArray()
+            json.GetPropertyOrNull("stickers")
+                ?.EnumerateArrayOrNull()
+                ?.Select(ParseSticker)
+                .ToArray()
             ?? [];
 
         var reactions =
@@ -305,7 +319,8 @@ internal static class ExportedMessageParser
         var reference = json.GetPropertyOrNull("reference")?.Pipe(ParseMessageReference);
 
         // The export schema doesn't include the full referenced message, only its reference
-        var forwardedMessage = json.GetPropertyOrNull("forwardedMessage")?.Pipe(ParseMessageSnapshot);
+        var forwardedMessage = json.GetPropertyOrNull("forwardedMessage")
+            ?.Pipe(ParseMessageSnapshot);
 
         var interaction = json.GetPropertyOrNull("interaction")?.Pipe(ParseInteraction);
 
