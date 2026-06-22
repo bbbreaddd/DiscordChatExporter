@@ -28,7 +28,7 @@ public static class Http
             .Any(ex =>
                 ex is TimeoutException or SocketException or AuthenticationException
                 || ex is HttpRequestException hrex
-                    && IsRetryableStatusCode(hrex.StatusCode ?? HttpStatusCode.OK)
+                    && (hrex.StatusCode is null || IsRetryableStatusCode(hrex.StatusCode.Value))
             );
 
     public static ResiliencePipeline ResiliencePipeline { get; } =
@@ -37,9 +37,12 @@ public static class Http
                 new RetryStrategyOptions
                 {
                     ShouldHandle = new PredicateBuilder().Handle<Exception>(IsRetryableException),
-                    MaxRetryAttempts = 4,
-                    BackoffType = DelayBackoffType.Exponential,
-                    Delay = TimeSpan.FromSeconds(1),
+                    MaxRetryAttempts = 10,
+                    DelayGenerator = args =>
+                    {
+                        var delay = Math.Min(60, Math.Pow(2, args.AttemptNumber) + 1);
+                        return ValueTask.FromResult<TimeSpan?>(TimeSpan.FromSeconds(delay));
+                    }
                 }
             )
             .Build();
@@ -52,7 +55,7 @@ public static class Http
                     ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
                         .Handle<Exception>(IsRetryableException)
                         .HandleResult(m => IsRetryableStatusCode(m.StatusCode)),
-                    MaxRetryAttempts = 8,
+                    MaxRetryAttempts = 12,
                     DelayGenerator = args =>
                     {
                         // If rate-limited, use retry-after header as the guide.
@@ -65,9 +68,8 @@ public static class Http
                             );
                         }
 
-                        return ValueTask.FromResult<TimeSpan?>(
-                            TimeSpan.FromSeconds(Math.Pow(2, args.AttemptNumber) + 1)
-                        );
+                        var delay = Math.Min(60, Math.Pow(2, args.AttemptNumber) + 1);
+                        return ValueTask.FromResult<TimeSpan?>(TimeSpan.FromSeconds(delay));
                     },
                 }
             )
