@@ -224,7 +224,7 @@ public class ChannelExporter(DiscordClient discord)
                             mergeTargetPath,
                             appendTempPath,
                             mergedTempPath,
-                            cancellationToken
+                            CancellationToken.None
                         );
                         File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
 
