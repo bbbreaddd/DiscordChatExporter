@@ -109,6 +109,16 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool ShouldReuseAssets { get; set; } = false;
 
     [CommandOption(
+        "cache-media",
+        Description = "Download assets to the media directory, but keep the original (remote) URLs "
+            + "in the export instead of replacing them with local paths. "
+            + "Useful for warming a media cache ahead of a later 'convert' run pointed at the same "
+            + "--media-dir, without making this export's URLs depend on local file paths. "
+            + "Cannot be combined with --media."
+    )]
+    public bool ShouldCacheAssetsOnly { get; set; } = false;
+
+    [CommandOption(
         "media-dir",
         Description = "Download assets to this directory. "
             + "If not specified, the asset directory path will be derived from the output path."
@@ -159,17 +169,31 @@ public abstract class ExportCommandBase : DiscordCommandBase
     {
         var cancellationToken = console.RegisterCancellationHandler();
 
+        // --media and --cache-media are mutually exclusive ways of triggering asset downloads
+        if (ShouldDownloadAssets && ShouldCacheAssetsOnly)
+        {
+            throw new CommandException(
+                "Options --media and --cache-media cannot be used together."
+            );
+        }
+
+        var isDownloadingAssets = ShouldDownloadAssets || ShouldCacheAssetsOnly;
+
         // Asset reuse can only be enabled if the download assets option is set
         // https://github.com/Tyrrrz/DiscordChatExporter/issues/425
-        if (ShouldReuseAssets && !ShouldDownloadAssets)
+        if (ShouldReuseAssets && !isDownloadingAssets)
         {
-            throw new CommandException("Option --reuse-media cannot be used without --media.");
+            throw new CommandException(
+                "Option --reuse-media cannot be used without --media or --cache-media."
+            );
         }
 
         // Assets directory can only be specified if the download assets option is set
-        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
+        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !isDownloadingAssets)
         {
-            throw new CommandException("Option --media-dir cannot be used without --media.");
+            throw new CommandException(
+                "Option --media-dir cannot be used without --media or --cache-media."
+            );
         }
 
         if (IsIncremental && ExportFormat != ExportFormat.Json)
@@ -309,7 +333,8 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                         ShouldReuseAssets,
                                         Locale,
                                         IsUtcNormalizationEnabled,
-                                        IsIncremental
+                                        IsIncremental,
+                                        ShouldCacheAssetsOnly
                                     );
 
                                     await Exporter.ExportChannelAsync(

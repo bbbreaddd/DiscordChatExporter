@@ -131,6 +131,14 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             "url",
             await Context.ResolveAssetUrlAsync(attachment.Url, cancellationToken)
         );
+
+        var cachedLocalPath = await Context.TryGetCachedAssetLocalPathAsync(
+            attachment.Url,
+            cancellationToken
+        );
+        if (cachedLocalPath is not null)
+            _writer.WriteString("localPath", cachedLocalPath);
+
         _writer.WriteString("fileName", attachment.FileName);
         _writer.WriteNumber("fileSizeBytes", attachment.FileSize.TotalBytes);
 

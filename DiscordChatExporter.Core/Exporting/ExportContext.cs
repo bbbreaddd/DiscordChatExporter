@@ -142,38 +142,49 @@ internal class ExportContext(
     public Color? TryGetUserColor(Snowflake id) =>
         GetUserRoles(id).Where(r => r.Color is not null).Select(r => r.Color).FirstOrDefault();
 
+    private string FormatDownloadedAssetPath(string filePath)
+    {
+        var relativeFilePath = Path.GetRelativePath(Request.OutputDirPath, filePath);
+
+        // Prefer the relative path so that the export package can be copied around without breaking references.
+        // However, if the assets directory lies outside the export directory, use the absolute path instead.
+        var shouldUseAbsoluteFilePath =
+            relativeFilePath.StartsWith(
+                ".." + Path.DirectorySeparatorChar,
+                StringComparison.Ordinal
+            )
+            || relativeFilePath.StartsWith(
+                ".." + Path.AltDirectorySeparatorChar,
+                StringComparison.Ordinal
+            );
+
+        var optimalFilePath = shouldUseAbsoluteFilePath ? filePath : relativeFilePath;
+
+        // For HTML, the path needs to be properly formatted
+        return Request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight
+            ? Url.EncodeFilePath(optimalFilePath)
+            : optimalFilePath;
+    }
+
     public async ValueTask<string> ResolveAssetUrlAsync(
         string url,
         CancellationToken cancellationToken = default
     )
     {
-        if (!Request.ShouldDownloadAssets)
+        if (!Request.ShouldDownloadAssets && !Request.ShouldCacheAssetsOnly)
             return url;
 
         try
         {
             var filePath = await _assetDownloader.DownloadAsync(url, cancellationToken);
-            var relativeFilePath = Path.GetRelativePath(Request.OutputDirPath, filePath);
 
-            // Prefer the relative path so that the export package can be copied around without breaking references.
-            // However, if the assets directory lies outside the export directory, use the absolute path instead.
-            var shouldUseAbsoluteFilePath =
-                relativeFilePath.StartsWith(
-                    ".." + Path.DirectorySeparatorChar,
-                    StringComparison.Ordinal
-                )
-                || relativeFilePath.StartsWith(
-                    ".." + Path.AltDirectorySeparatorChar,
-                    StringComparison.Ordinal
-                );
+            // Caching-only mode warms the asset directory as a side effect, but keeps the
+            // original (remote) URL in the export so it stays portable and can be safely
+            // reused as a source for a later 'convert' run pointed at the same asset directory.
+            if (Request.ShouldCacheAssetsOnly)
+                return url;
 
-            var optimalFilePath = shouldUseAbsoluteFilePath ? filePath : relativeFilePath;
-
-            // For HTML, the path needs to be properly formatted
-            if (Request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight)
-                return Url.EncodeFilePath(optimalFilePath);
-
-            return optimalFilePath;
+            return FormatDownloadedAssetPath(filePath);
         }
         // Try to catch only exceptions related to failed HTTP requests
         // https://github.com/Tyrrrz/DiscordChatExporter/issues/332
@@ -183,6 +194,29 @@ internal class ExportContext(
             // We don't want this to crash the exporting process in case of failure.
             // TODO: add logging so we can be more liberal with catching exceptions.
             return url;
+        }
+    }
+
+    // In caching-only mode, the export keeps the original remote URL (see ResolveAssetUrlAsync
+    // above) but the downloaded copy on disk is otherwise unreferenced. This surfaces that local
+    // path separately so it can be recorded alongside the original URL, which is useful because
+    // Discord's CDN links for attachments are signed and expire, while the downloaded file does not.
+    public async ValueTask<string?> TryGetCachedAssetLocalPathAsync(
+        string url,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (!Request.ShouldCacheAssetsOnly)
+            return null;
+
+        try
+        {
+            var filePath = await _assetDownloader.DownloadAsync(url, cancellationToken);
+            return FormatDownloadedAssetPath(filePath);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+        {
+            return null;
         }
     }
 }

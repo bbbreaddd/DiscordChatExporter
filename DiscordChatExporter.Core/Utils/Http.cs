@@ -42,7 +42,7 @@ public static class Http
                     {
                         var delay = Math.Min(60, Math.Pow(2, args.AttemptNumber) + 1);
                         return ValueTask.FromResult<TimeSpan?>(TimeSpan.FromSeconds(delay));
-                    }
+                    },
                 }
             )
             .Build();

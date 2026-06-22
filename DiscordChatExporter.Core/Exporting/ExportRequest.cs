@@ -43,6 +43,8 @@ public partial class ExportRequest
 
     public bool ShouldReuseAssets { get; }
 
+    public bool ShouldCacheAssetsOnly { get; }
+
     public string? Locale { get; }
 
     public CultureInfo? CultureInfo { get; }
@@ -67,7 +69,8 @@ public partial class ExportRequest
         bool shouldReuseAssets,
         string? locale,
         bool isUtcNormalizationEnabled,
-        bool isIncremental = false
+        bool isIncremental = false,
+        bool shouldCacheAssetsOnly = false
     )
     {
         Guild = guild;
@@ -81,6 +84,7 @@ public partial class ExportRequest
         ShouldFormatMarkdown = shouldFormatMarkdown;
         ShouldDownloadAssets = shouldDownloadAssets;
         ShouldReuseAssets = shouldReuseAssets;
+        ShouldCacheAssetsOnly = shouldCacheAssetsOnly;
         Locale = locale;
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
         IsIncremental = isIncremental;
