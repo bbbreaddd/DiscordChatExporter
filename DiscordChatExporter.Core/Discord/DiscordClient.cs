@@ -830,7 +830,7 @@ public class DiscordClient
         Snowflake channelId,
         Snowflake? after = null,
         Snowflake? before = null,
-        IProgress<Percentage>? progress = null,
+        IProgress<ExportProgress>? progress = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
@@ -888,12 +888,15 @@ public class DiscordClient
                     var totalDuration = (lastMessage.Timestamp - firstMessage.Timestamp).Duration();
 
                     progress.Report(
-                        Percentage.FromFraction(
-                            // Avoid division by zero if all messages have the exact same timestamp
-                            // (which happens when there's only one message in the channel)
-                            totalDuration > TimeSpan.Zero
-                                ? exportedDuration / totalDuration
-                                : 1
+                        new ExportProgress(
+                            Percentage.FromFraction(
+                                // Avoid division by zero if all messages have the exact same timestamp
+                                // (which happens when there's only one message in the channel)
+                                totalDuration > TimeSpan.Zero
+                                    ? exportedDuration / totalDuration
+                                    : 1
+                            ),
+                            message.Timestamp
                         )
                     );
                 }
@@ -908,7 +911,7 @@ public class DiscordClient
         Snowflake channelId,
         Snowflake? after = null,
         Snowflake? before = null,
-        IProgress<Percentage>? progress = null,
+        IProgress<ExportProgress>? progress = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
@@ -956,12 +959,15 @@ public class DiscordClient
                     var totalDuration = (lastMessage.Timestamp - firstMessage.Timestamp).Duration();
 
                     progress.Report(
-                        Percentage.FromFraction(
-                            // Avoid division by zero if all messages have the exact same timestamp
-                            // (which happens when there's only one message in the channel)
-                            totalDuration > TimeSpan.Zero
-                                ? exportedDuration / totalDuration
-                                : 1
+                        new ExportProgress(
+                            Percentage.FromFraction(
+                                // Avoid division by zero if all messages have the exact same timestamp
+                                // (which happens when there's only one message in the channel)
+                                totalDuration > TimeSpan.Zero
+                                    ? exportedDuration / totalDuration
+                                    : 1
+                            ),
+                            message.Timestamp
                         )
                     );
                 }

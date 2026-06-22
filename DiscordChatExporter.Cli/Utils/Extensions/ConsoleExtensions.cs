@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Core.Exporting;
 using Spectre.Console;
 
 namespace DiscordChatExporter.Cli.Utils.Extensions;
@@ -34,6 +35,21 @@ internal static class ConsoleExtensions
                     new ProgressBarColumn(),
                     new PercentageColumn()
                 );
+    }
+
+    public static IProgress<ExportProgress> ToExportProgress(
+        this ProgressTask progressTask,
+        string baseDescription
+    )
+    {
+        return new Progress<ExportProgress>(p =>
+        {
+            progressTask.Value = p.Percentage.Fraction;
+            if (p.CurrentTimestamp is { } ts)
+            {
+                progressTask.Description = $"{baseDescription} ({ts:yyyy-MM-dd})";
+            }
+        });
     }
 
     public static async ValueTask StartTaskAsync(

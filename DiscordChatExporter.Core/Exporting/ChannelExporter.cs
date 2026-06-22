@@ -18,7 +18,7 @@ public class ChannelExporter(DiscordClient discord)
     public async ValueTask ExportChannelAsync(
         ExportRequest request,
         ExportManifest? manifest = null,
-        IProgress<Percentage>? progress = null,
+        IProgress<ExportProgress>? progress = null,
         CancellationToken cancellationToken = default
     )
     {
@@ -63,7 +63,7 @@ public class ChannelExporter(DiscordClient discord)
         {
             if (manifestEntry.LastMessageId == request.Channel.LastMessageId?.ToString())
             {
-                progress?.Report(Percentage.FromFraction(1.0));
+                progress?.Report(new ExportProgress(Percentage.FromFraction(1.0)));
                 return;
             }
         }
@@ -169,78 +169,105 @@ public class ChannelExporter(DiscordClient discord)
             var mergedTempPath = request.OutputFilePath + ".merged.tmp";
             long newMessageCount = 0;
             Snowflake? newMaxMessageId = null;
+            var isStreamingAppendCompletedSuccessfully = false;
 
             try
             {
-                await using (var messageExporter = new MessageExporter(context, appendTempPath))
+                try
                 {
-                    await foreach (var message in messages)
+                    await using (var messageExporter = new MessageExporter(context, appendTempPath))
                     {
-                        try
+                        await foreach (var message in messages)
                         {
-                            foreach (var user in message.GetReferencedUsers())
-                                await context.PopulateMemberAsync(user, cancellationToken);
-
-                            if (request.MessageFilter.IsMatch(message))
+                            try
                             {
-                                await messageExporter.ExportMessageAsync(
-                                    message,
-                                    cancellationToken
+                                foreach (var user in message.GetReferencedUsers())
+                                    await context.PopulateMemberAsync(user, cancellationToken);
+
+                                if (request.MessageFilter.IsMatch(message))
+                                {
+                                    await messageExporter.ExportMessageAsync(
+                                        message,
+                                        cancellationToken
+                                    );
+                                    newMessageCount++;
+                                    if (
+                                        newMaxMessageId is null
+                                        || message.Id > newMaxMessageId.Value
+                                    )
+                                        newMaxMessageId = message.Id;
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                throw new DiscordChatExporterException(
+                                    $"Failed to export message #{message.Id} "
+                                        + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                                        + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                    ex
                                 );
-                                newMessageCount++;
-                                if (newMaxMessageId is null || message.Id > newMaxMessageId.Value)
-                                    newMaxMessageId = message.Id;
                             }
                         }
-                        catch (Exception ex)
+                    }
+                    isStreamingAppendCompletedSuccessfully = true;
+                }
+                finally
+                {
+                    // Merge and save whatever was written up to this point, even if an exception was thrown.
+                    // This enables auto-resume of progress on subsequent runs.
+                    if (newMessageCount > 0)
+                    {
+                        var mergeTargetPath = existingPartitionPaths[^1];
+
+                        await IncrementalJsonAppender.MergeAsync(
+                            mergeTargetPath,
+                            appendTempPath,
+                            mergedTempPath,
+                            cancellationToken
+                        );
+                        File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
+
+                        // If the newly-fetched messages alone exceeded the partition limit, the
+                        // writer above already split them into further temp partitions
+                        // (appendTempPath, appendTempPath " [part 2]", ...). Only the first one
+                        // was merged above; promote the rest to new partitions instead of
+                        // silently dropping them.
+                        var nextPartitionIndex = existingPartitionPaths.Length;
+                        for (var i = 1; ; i++)
                         {
-                            throw new DiscordChatExporterException(
-                                $"Failed to export message #{message.Id} "
-                                    + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
-                                    + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                                ex is not DiscordChatExporterException dex || dex.IsFatal,
-                                ex
+                            var overflowTempPath = MessageExporter.GetPartitionFilePath(
+                                appendTempPath,
+                                i
                             );
+                            if (!File.Exists(overflowTempPath))
+                                break;
+
+                            var newPartitionPath = MessageExporter.GetPartitionFilePath(
+                                request.OutputFilePath,
+                                nextPartitionIndex
+                            );
+                            File.Move(overflowTempPath, newPartitionPath, overwrite: false);
+                            nextPartitionIndex++;
                         }
                     }
-                }
 
-                // If any new messages were written, merge the temp file into the *newest*
-                // existing partition (not always the first one) so that partitioned channels
-                // keep appending where they left off instead of growing partition #1 forever.
-                if (newMessageCount > 0)
-                {
-                    var mergeTargetPath = existingPartitionPaths[^1];
-
-                    await IncrementalJsonAppender.MergeAsync(
-                        mergeTargetPath,
-                        appendTempPath,
-                        mergedTempPath,
-                        cancellationToken
-                    );
-                    File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
-
-                    // If the newly-fetched messages alone exceeded the partition limit, the
-                    // writer above already split them into further temp partitions
-                    // (appendTempPath, appendTempPath " [part 2]", ...). Only the first one
-                    // was merged above; promote the rest to new partitions instead of
-                    // silently dropping them.
-                    var nextPartitionIndex = existingPartitionPaths.Length;
-                    for (var i = 1; ; i++)
+                    // Update manifest if we either completed successfully, or managed to export new messages before failing.
+                    if (
+                        manifest is not null
+                        && (isStreamingAppendCompletedSuccessfully || newMessageCount > 0)
+                    )
                     {
-                        var overflowTempPath = MessageExporter.GetPartitionFilePath(
-                            appendTempPath,
-                            i
+                        var updatedLastMessageId =
+                            newMaxMessageId?.ToString()
+                            ?? resolvedLastMessageId?.ToString()
+                            ?? manifestEntry?.LastMessageId;
+                        manifest.UpdateEntry(
+                            request.Channel.Id.ToString(),
+                            updatedLastMessageId,
+                            request.Channel.IsArchived
                         );
-                        if (!File.Exists(overflowTempPath))
-                            break;
-
-                        var newPartitionPath = MessageExporter.GetPartitionFilePath(
-                            request.OutputFilePath,
-                            nextPartitionIndex
-                        );
-                        File.Move(overflowTempPath, newPartitionPath, overwrite: false);
-                        nextPartitionIndex++;
+                        await manifest.SaveAsync(request.BaseOutputDirPath);
                     }
                 }
             }
@@ -251,23 +278,6 @@ public class ChannelExporter(DiscordClient discord)
                     File.Delete(appendTempPath);
                 if (File.Exists(mergedTempPath))
                     File.Delete(mergedTempPath);
-            }
-
-            // Update manifest: use the new max message ID if we wrote any, otherwise fall
-            // back to whatever resume point we used this run (which, for a channel that had
-            // no manifest entry yet, is the one we just derived from its newest partition).
-            if (manifest is not null)
-            {
-                var updatedLastMessageId =
-                    newMaxMessageId?.ToString()
-                    ?? resolvedLastMessageId?.ToString()
-                    ?? manifestEntry?.LastMessageId;
-                manifest.UpdateEntry(
-                    request.Channel.Id.ToString(),
-                    updatedLastMessageId,
-                    request.Channel.IsArchived
-                );
-                await manifest.SaveAsync(request.BaseOutputDirPath);
             }
 
             return;
@@ -387,82 +397,110 @@ public class ChannelExporter(DiscordClient discord)
             orderedMessages = [];
         }
 
-        await using var freshExporter = new MessageExporter(freshContext);
+        Snowflake? maxMessageId = null;
+        var isFreshExportCompletedSuccessfully = false;
 
-        if (existingChat is not null)
+        try
         {
-            // Legacy incremental: write merged ordered messages
-            foreach (var message in orderedMessages)
+            await using (var freshExporter = new MessageExporter(freshContext))
             {
-                try
+                if (existingChat is not null)
                 {
-                    foreach (var user in message.GetReferencedUsers())
-                        await freshContext.PopulateMemberAsync(user, cancellationToken);
+                    // Legacy incremental: write merged ordered messages
+                    foreach (var message in orderedMessages)
+                    {
+                        try
+                        {
+                            foreach (var user in message.GetReferencedUsers())
+                                await freshContext.PopulateMemberAsync(user, cancellationToken);
 
-                    if (request.MessageFilter.IsMatch(message))
-                        await freshExporter.ExportMessageAsync(message, cancellationToken);
+                            if (request.MessageFilter.IsMatch(message))
+                            {
+                                await freshExporter.ExportMessageAsync(message, cancellationToken);
+                                if (maxMessageId is null || message.Id > maxMessageId.Value)
+                                    maxMessageId = message.Id;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            throw new DiscordChatExporterException(
+                                $"Failed to export message #{message.Id} "
+                                    + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                                    + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                                ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                ex
+                            );
+                        }
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    throw new DiscordChatExporterException(
-                        $"Failed to export message #{message.Id} "
-                            + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
-                            + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                        ex is not DiscordChatExporterException dex || dex.IsFatal,
-                        ex
-                    );
+                    // Fresh export: stream directly from the API to the writer (Fix 3)
+                    await foreach (var message in freshMessages)
+                    {
+                        try
+                        {
+                            foreach (var user in message.GetReferencedUsers())
+                                await freshContext.PopulateMemberAsync(user, cancellationToken);
+
+                            if (request.MessageFilter.IsMatch(message))
+                            {
+                                await freshExporter.ExportMessageAsync(message, cancellationToken);
+                                if (maxMessageId is null || message.Id > maxMessageId.Value)
+                                    maxMessageId = message.Id;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            throw new DiscordChatExporterException(
+                                $"Failed to export message #{message.Id} "
+                                    + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                                    + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                                ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                ex
+                            );
+                        }
+                    }
                 }
             }
+            isFreshExportCompletedSuccessfully = true;
         }
-        else
+        finally
         {
-            // Fresh export: stream directly from the API to the writer (Fix 3)
-            await foreach (var message in freshMessages)
+            if (manifest is not null)
             {
-                try
+                // Calculate max message ID for manifest
+                Snowflake? finalMaxMessageId;
+                if (isFreshExportCompletedSuccessfully)
                 {
-                    foreach (var user in message.GetReferencedUsers())
-                        await freshContext.PopulateMemberAsync(user, cancellationToken);
-
-                    if (request.MessageFilter.IsMatch(message))
-                        await freshExporter.ExportMessageAsync(message, cancellationToken);
+                    if (existingChat is not null)
+                    {
+                        var orderedArr = orderedMessages.ToArray();
+                        finalMaxMessageId = orderedArr.Any()
+                            ? orderedArr.Max(m => m.Id)
+                            : (Snowflake?)null;
+                    }
+                    else
+                    {
+                        finalMaxMessageId =
+                            maxMessageId ?? (Snowflake?)request.Channel.LastMessageId;
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    throw new DiscordChatExporterException(
-                        $"Failed to export message #{message.Id} "
-                            + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
-                            + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                        ex is not DiscordChatExporterException dex || dex.IsFatal,
-                        ex
+                    finalMaxMessageId = maxMessageId;
+                }
+
+                if (finalMaxMessageId is not null || request.Channel.LastMessageId is null)
+                {
+                    manifest.UpdateEntry(
+                        request.Channel.Id.ToString(),
+                        finalMaxMessageId?.ToString(),
+                        request.Channel.IsArchived
                     );
+                    await manifest.SaveAsync(request.BaseOutputDirPath);
                 }
             }
-        }
-
-        // Calculate max message ID for manifest
-        Snowflake? maxMessageId;
-        if (existingChat is not null)
-        {
-            var orderedArr = orderedMessages.ToArray();
-            maxMessageId = orderedArr.Any() ? orderedArr.Max(m => m.Id) : (Snowflake?)null;
-        }
-        else
-        {
-            maxMessageId =
-                freshExporter.MessagesExported > 0
-                    ? (Snowflake?)request.Channel.LastMessageId
-                    : null;
-        }
-
-        if (manifest is not null)
-        {
-            manifest.UpdateEntry(
-                request.Channel.Id.ToString(),
-                maxMessageId?.ToString(),
-                request.Channel.IsArchived
-            );
-            await manifest.SaveAsync(request.BaseOutputDirPath);
         }
     }
 

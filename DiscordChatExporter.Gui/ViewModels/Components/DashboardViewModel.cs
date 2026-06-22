@@ -302,7 +302,9 @@ public partial class DashboardViewModel : ViewModelBase
 
                         await exporter.ExportChannelAsync(
                             request,
-                            progress: progress,
+                            progress: new Progress<ExportProgress>(p =>
+                                progress.Report(p.Percentage)
+                            ),
                             cancellationToken: cancellationToken
                         );
 

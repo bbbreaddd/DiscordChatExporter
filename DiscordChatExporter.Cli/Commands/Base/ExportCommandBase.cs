@@ -315,7 +315,9 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                     await Exporter.ExportChannelAsync(
                                         request,
                                         manifest,
-                                        progress.ToPercentageBased(),
+                                        progress.ToExportProgress(
+                                            Markup.Escape(channel.GetHierarchicalName())
+                                        ),
                                         innerCancellationToken
                                     );
                                 }
