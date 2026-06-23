@@ -14,6 +14,13 @@ public class ChatConverter
         CancellationToken cancellationToken = default
     )
     {
+        // The converted output's path is derived from the guild/category/channel's current
+        // name, which can drift from a previous run if any of those got renamed on Discord in
+        // the meantime. If nothing exists yet at the freshly-computed path, relocate whatever
+        // was previously converted for this channel ID (even under a template directory like
+        // "%G/%T/%C/" that moved entirely) instead of leaving a stale, disconnected copy behind.
+        ExistingOutputRelocator.RelocateIfNeeded(request);
+
         var context = new ExportContext(null, request, chat.Members, chat.Roles);
 
         // Initialize the exporter before further checks to ensure the file is created even if

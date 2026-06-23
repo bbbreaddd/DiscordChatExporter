@@ -10,6 +10,8 @@ using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exceptions;
 using DiscordChatExporter.Core.Exporting.Converting;
 using Gress;
+using JsonExtensions.Reading;
+using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
@@ -27,31 +29,13 @@ public class ChannelExporter(DiscordClient discord)
         // which can drift from what was used last time (channel or category renamed on
         // Discord, or the name-escaping rules changed between versions). If nothing exists
         // at the fresh path yet, look for a file already tracking this channel ID under a
-        // different name in the same directory. Rename it (along with its partitions and
-        // default-convention assets folder) to the fresh path, so the file on disk picks up
-        // the channel's current name instead of staying stuck under a stale one forever. If
-        // the fresh path is already taken by something else, fall back to just redirecting
-        // output to the old file instead, like before.
-        if (request.IsIncremental && !File.Exists(request.OutputFilePath))
-        {
-            var existingPath = FindExistingBaseFilePath(
-                request.OutputDirPath,
-                request.Channel.Id.ToString(),
-                request.Format.GetFileExtension()
-            );
-
-            if (existingPath is not null)
-            {
-                var renamed = TryRenameToFreshOutputPath(
-                    existingPath,
-                    request.OutputFilePath,
-                    request.AssetsDirPath
-                );
-
-                if (!renamed)
-                    request.RedirectOutputFilePath(existingPath);
-            }
-        }
+        // different name/location. Rename it (along with its partitions and default-convention
+        // assets folder) to the fresh path, so the file on disk picks up the channel's current
+        // name instead of staying stuck under a stale one forever. If the fresh path is already
+        // taken by something else, fall back to just redirecting output to the old file
+        // instead, like before.
+        if (request.IsIncremental)
+            ExistingOutputRelocator.RelocateIfNeeded(request);
 
         // --- Manifest-based skip: channel has not changed since last export ---
         var manifestEntry = manifest?.Channels.GetValueOrDefault(request.Channel.Id.ToString());
@@ -61,7 +45,31 @@ public class ChannelExporter(DiscordClient discord)
             && File.Exists(request.OutputFilePath)
         )
         {
-            if (manifestEntry.LastMessageId == request.Channel.LastMessageId?.ToString())
+            // Even when the channel's LastMessageId hasn't moved (no new messages), the
+            // guild/category/channel metadata recorded in the existing file's header can still
+            // be stale -- e.g. the channel or one of its parent categories was renamed on
+            // Discord. Treat that as a reason to re-export too, since otherwise the header
+            // would stay stuck under outdated names forever (there are no new messages to
+            // trigger a refresh).
+            bool headerMatches;
+            try
+            {
+                headerMatches = HeaderMatchesRequest(request.OutputFilePath, request);
+            }
+            catch (Exception ex)
+            {
+                throw new DiscordChatExporterException(
+                    $"Failed to parse the existing JSON export file '{request.OutputFilePath}' "
+                        + "to check whether its metadata is still up to date.",
+                    true,
+                    ex
+                );
+            }
+
+            if (
+                manifestEntry.LastMessageId == request.Channel.LastMessageId?.ToString()
+                && headerMatches
+            )
             {
                 progress?.Report(new ExportProgress(Percentage.FromFraction(1.0)));
                 return;
@@ -90,7 +98,9 @@ public class ChannelExporter(DiscordClient discord)
 
         if (request.IsIncremental && File.Exists(request.OutputFilePath))
         {
-            existingPartitionPaths = GetExistingPartitionFilePaths(request.OutputFilePath);
+            existingPartitionPaths = ExistingOutputRelocator.GetExistingPartitionFilePaths(
+                request.OutputFilePath
+            );
 
             if (manifestEntry?.LastMessageId is { } lastMsgIdStr)
             {
@@ -215,8 +225,11 @@ public class ChannelExporter(DiscordClient discord)
                 finally
                 {
                     // Merge and save whatever was written up to this point, even if an exception was thrown.
-                    // This enables auto-resume of progress on subsequent runs.
-                    if (newMessageCount > 0)
+                    // This enables auto-resume of progress on subsequent runs. The merge always runs, even
+                    // when zero new messages were found, because it's also what refreshes the
+                    // guild/channel/category metadata and exportedAt timestamp from the fresh temp export
+                    // (e.g. after a rename) -- a header that's only refreshed when there happen to be new
+                    // messages would stay stuck under stale metadata indefinitely on a quiet channel.
                     {
                         var mergeTargetPath = existingPartitionPaths[^1];
 
@@ -504,112 +517,97 @@ public class ChannelExporter(DiscordClient discord)
         }
     }
 
-    // Returns the paths of all partition files that currently exist on disk for a channel,
-    // in partition order (index 0 first). Always contains at least one path, since it's only
-    // called after confirming the base file exists.
-    private static string[] GetExistingPartitionFilePaths(string baseFilePath)
+    // Compares the guild/channel/category metadata recorded in an existing incremental export's
+    // header against the live metadata on the current request, to decide whether the manifest
+    // fast-skip (based on LastMessageId alone) is still safe to take. Icon URLs are only
+    // compared when they're guaranteed to be stored as the original remote URL in the header;
+    // when assets are downloaded and embedded as local paths (--media without --cache-media),
+    // the header's iconUrl can never equal the live remote URL even when nothing has changed,
+    // so comparing it there would permanently defeat the skip.
+    //
+    // Internal (rather than private) so it can be unit-tested directly without needing a live
+    // Discord connection.
+    internal static bool HeaderMatchesRequest(string existingFilePath, ExportRequest request)
     {
-        var paths = new List<string>();
+        using var header = IncrementalJsonAppender.ParseHeader(existingFilePath);
+        var root = header.RootElement;
 
-        for (var index = 0; ; index++)
-        {
-            var path = MessageExporter.GetPartitionFilePath(baseFilePath, index);
-            if (!File.Exists(path))
-                break;
+        var compareIconUrls = !request.ShouldDownloadAssets || request.ShouldCacheAssetsOnly;
 
-            paths.Add(path);
-        }
-
-        return paths.ToArray();
-    }
-
-    // Moves an existing export (all of its partitions, plus its assets folder if that folder
-    // still follows the default naming convention) from its old, stale-named location over to
-    // the freshly-computed path for the channel's current name. Returns false without leaving
-    // any partitions renamed if the destination is already occupied by some other file, or if
-    // the fresh name can't be created at all (e.g. it's too long for the filesystem — Discord
-    // allows up to 100 characters each for guild/category/channel names, which can combine into
-    // a file name longer than what the OS allows, especially with multi-byte Unicode names).
-    // Either way, the caller falls back to writing under the old name instead.
-    private static bool TryRenameToFreshOutputPath(
-        string oldBaseFilePath,
-        string newBaseFilePath,
-        string newAssetsDirPath
-    )
-    {
-        var oldPartitionPaths = GetExistingPartitionFilePaths(oldBaseFilePath);
-        var newPartitionPaths = oldPartitionPaths
-            .Select((_, index) => MessageExporter.GetPartitionFilePath(newBaseFilePath, index))
-            .ToArray();
-
-        if (newPartitionPaths.Any(File.Exists))
+        var guildJson = root.GetProperty("guild");
+        if (guildJson.GetProperty("name").GetNonNullString() != request.Guild.Name)
             return false;
-
-        var movedCount = 0;
-        try
-        {
-            for (; movedCount < oldPartitionPaths.Length; movedCount++)
-                File.Move(oldPartitionPaths[movedCount], newPartitionPaths[movedCount]);
-        }
-        catch (IOException)
-        {
-            // Undo whatever partitions were already moved before bailing out, so we never
-            // leave the export split between the old and new names.
-            for (var i = 0; i < movedCount; i++)
-                File.Move(newPartitionPaths[i], oldPartitionPaths[i]);
-            return false;
-        }
-
-        // Only follow along with the assets folder if it's still sitting at the default
-        // location (output path + "_Files"); a custom --media-dir is left untouched since it
-        // might not even be derived from the channel's name.
-        var oldAssetsDirPath = Path.TrimEndingDirectorySeparator($"{oldBaseFilePath}_Files");
-        var newAssetsDirPathTrimmed = Path.TrimEndingDirectorySeparator(newAssetsDirPath);
         if (
-            string.Equals(
-                newAssetsDirPathTrimmed,
-                Path.TrimEndingDirectorySeparator($"{newBaseFilePath}_Files"),
-                StringComparison.Ordinal
-            )
-            && Directory.Exists(oldAssetsDirPath)
-            && !Directory.Exists(newAssetsDirPathTrimmed)
+            compareIconUrls
+            && guildJson.GetProperty("iconUrl").GetNonWhiteSpaceStringOrNull()
+                != request.Guild.IconUrl
         )
-        {
-            // Best-effort only: the partitions (the actual message history) have already
-            // been renamed successfully at this point, which is what matters. If the assets
-            // folder can't follow along (e.g. same path-length issue), just leave it under
-            // the old name rather than undoing the partition rename over a non-essential
-            // side effect.
-            try
-            {
-                Directory.Move(oldAssetsDirPath, newAssetsDirPathTrimmed);
-            }
-            catch (IOException) { }
-        }
+            return false;
+
+        var channelJson = root.GetProperty("channel");
+
+        var kind = channelJson
+            .GetProperty("type")
+            .GetNonNullString()
+            .Pipe(s => Enum.Parse<ChannelKind>(s));
+        if (kind != request.Channel.Kind)
+            return false;
+
+        if (channelJson.GetProperty("name").GetNonNullString() != request.Channel.Name)
+            return false;
+
+        if (channelJson.GetPropertyOrNull("topic")?.GetStringOrNull() != request.Channel.Topic)
+            return false;
+
+        if (
+            compareIconUrls
+            && channelJson.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull()
+                != request.Channel.IconUrl
+        )
+            return false;
+
+        var categoryId = channelJson
+            .GetPropertyOrNull("categoryId")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
+        if (categoryId != request.Channel.Parent?.Id)
+            return false;
+
+        if (
+            channelJson.GetPropertyOrNull("category")?.GetNonWhiteSpaceStringOrNull()
+            != request.Channel.Parent?.Name
+        )
+            return false;
+
+        var parentCategoryId = channelJson
+            .GetPropertyOrNull("parentCategoryId")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
+        if (parentCategoryId != request.Channel.Parent?.Parent?.Id)
+            return false;
+
+        if (
+            channelJson.GetPropertyOrNull("parentCategory")?.GetNonWhiteSpaceStringOrNull()
+            != request.Channel.Parent?.Parent?.Name
+        )
+            return false;
+
+        var dateRangeJson = root.GetProperty("dateRange");
+
+        var after = dateRangeJson
+            .GetPropertyOrNull("after")
+            ?.GetDateTimeOffsetOrNull()
+            ?.Pipe(Snowflake.FromDate);
+        if (after != request.After)
+            return false;
+
+        var before = dateRangeJson
+            .GetPropertyOrNull("before")
+            ?.GetDateTimeOffsetOrNull()
+            ?.Pipe(Snowflake.FromDate);
+        if (before != request.Before)
+            return false;
 
         return true;
-    }
-
-    // Looks for an existing base export file (partition #1) for the given channel ID in the
-    // output directory, regardless of the cosmetic guild/category/channel name in its filename.
-    // If a channel or category got renamed since the last export, or the name-escaping rules
-    // changed between versions, more than one name may match; the most recently written one is
-    // assumed to be the most complete and is preferred.
-    private static string? FindExistingBaseFilePath(
-        string outputDirPath,
-        string channelId,
-        string extension
-    )
-    {
-        if (!Directory.Exists(outputDirPath))
-            return null;
-
-        var suffix = $"[{channelId}].{extension}";
-
-        return Directory
-            .EnumerateFiles(outputDirPath, $"*{suffix}")
-            .Where(path => Path.GetFileName(path).EndsWith(suffix, StringComparison.Ordinal))
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
     }
 }

@@ -25,6 +25,13 @@ public partial class ExportRequest
 
     public string BaseOutputDirPath { get; }
 
+    // The deepest directory that is guaranteed to not move even if the output path template
+    // (e.g. "%G/%T/%C/") expands differently due to a guild/category/channel rename. Used to
+    // recursively look for a pre-existing output file for the same channel ID under a stale
+    // name/directory, since with template directories the rename can move the file into an
+    // entirely different folder, not just give it a different name within the same folder.
+    internal string OutputSearchRootDirPath { get; }
+
     public ExportFormat Format { get; }
 
     public Snowflake? After { get; }
@@ -93,6 +100,8 @@ public partial class ExportRequest
             Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)
                 ? outputPath
                 : Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory();
+
+        OutputSearchRootDirPath = GetOutputSearchRootDirPath(outputPath);
 
         OutputFilePath = GetOutputBaseFilePath(Guild, Channel, outputPath, Format, After, Before);
 
@@ -176,6 +185,31 @@ public partial class ExportRequest
         buffer.Append('.').Append(format.GetFileExtension());
 
         return Path.EscapeFileName(buffer.ToString());
+    }
+
+    // Finds the deepest directory in the (unexpanded) output path that cannot be affected by
+    // template substitution. If the path has no template tokens, this is just its directory
+    // portion. Otherwise, only the part of the path before the first token is stable across
+    // renames, so we walk back from there to the nearest directory separator.
+    private static string GetOutputSearchRootDirPath(string outputPath)
+    {
+        var templateTokenIndex = outputPath.IndexOf('%');
+        if (templateTokenIndex < 0)
+        {
+            return Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)
+                ? outputPath
+                : Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory();
+        }
+
+        var stablePrefix = outputPath[..templateTokenIndex];
+        var lastSeparatorIndex = stablePrefix.LastIndexOfAny([
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar,
+        ]);
+
+        return lastSeparatorIndex >= 0
+            ? stablePrefix[..(lastSeparatorIndex + 1)]
+            : Path.GetPathRoot(outputPath) ?? Directory.GetCurrentDirectory();
     }
 
     private static string FormatPath(
