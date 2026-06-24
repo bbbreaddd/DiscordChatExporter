@@ -67,6 +67,8 @@ public class ExportManifest
         }
     }
 
+    public void RemoveEntry(string channelId) => Channels.TryRemove(channelId, out _);
+
     public void UpdateEntry(string channelId, string? lastMessageId, bool isArchived)
     {
         Channels[channelId] = new ChannelManifestEntry

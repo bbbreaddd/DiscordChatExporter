@@ -133,7 +133,18 @@ internal static class IncrementalJsonAppender
     ) FindMessagesContent(string filePath)
     {
         var (closeBracketPos, count) = FindInsertPoint(filePath);
+        var openBracketPos = FindMessagesArrayOpenOffset(filePath);
+        return (openBracketPos, closeBracketPos, count);
+    }
 
+    /// <summary>
+    /// Returns the byte offset of the <c>[</c> that opens the <c>messages</c> array. Unlike
+    /// <see cref="FindMessagesContent"/>, this only reads the header and does not require the
+    /// file to have a valid trailing structure (closing <c>]</c> / <c>messageCount</c>), so it
+    /// can be used on an export that was truncated by a crash mid-way through the messages array.
+    /// </summary>
+    public static long FindMessagesArrayOpenOffset(string filePath)
+    {
         var (header, msgsIdx) = ReadHeaderBytes(filePath);
 
         // Find the '[' that opens the array (comes immediately after "messages":)
@@ -144,8 +155,7 @@ internal static class IncrementalJsonAppender
                 $"Could not find opening '[' of messages array in '{filePath}'."
             );
 
-        var openBracketPos = msgsIdx + MessagesKey.Length + openBracketOffset;
-        return (openBracketPos, closeBracketPos, count);
+        return msgsIdx + MessagesKey.Length + openBracketOffset;
     }
 
     /// <summary>

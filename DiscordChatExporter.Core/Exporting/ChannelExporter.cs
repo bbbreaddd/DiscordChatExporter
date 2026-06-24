@@ -37,6 +37,14 @@ public class ChannelExporter(DiscordClient discord)
         if (request.IsIncremental)
             ExistingOutputRelocator.RelocateIfNeeded(request);
 
+        // --- Hard-crash recovery ---
+        // If a previous run was killed mid-export (process killed, power loss, OOM), the normal
+        // graceful paths that finalize and merge progress never ran. Repair/promote any salvageable
+        // in-progress writer temp and clean up regenerable scratch files before deciding how to
+        // resume, so progress isn't silently restarted from scratch.
+        if (request.IsIncremental)
+            await CrashRecovery.RecoverAsync(request, manifest, cancellationToken);
+
         // --- Manifest-based skip: channel has not changed since last export ---
         var manifestEntry = manifest?.Channels.GetValueOrDefault(request.Channel.Id.ToString());
         if (
