@@ -218,9 +218,21 @@ public static class MediaInspector
             .OfType<HttpRequestException>()
             .Any(ex => ex.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone);
 
+    private static bool IsFileValid(string path)
+    {
+        try
+        {
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
     private static bool IsCached(string assetsDirPath, string url) =>
-        File.Exists(Path.Combine(assetsDirPath, ExportAssetDownloader.GetFileNameFromUrl(url)))
-        || File.Exists(
+        IsFileValid(Path.Combine(assetsDirPath, ExportAssetDownloader.GetFileNameFromUrl(url)))
+        || IsFileValid(
             Path.Combine(assetsDirPath, ExportAssetDownloader.GetLegacyFileNameFromUrl(url))
         );
 

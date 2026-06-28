@@ -61,7 +61,7 @@ internal partial class ExportAssetDownloader(
             return cachedFilePath;
 
         // Reuse existing files if we're allowed to
-        if (ShouldReuse && File.Exists(filePath))
+        if (ShouldReuse && IsFileValid(filePath))
             return _previousPathsByUrl[url] = filePath;
 
         // Check for a file cached by the legacy naming scheme (5-char hash) and rename it
@@ -69,7 +69,7 @@ internal partial class ExportAssetDownloader(
         if (ShouldReuse)
         {
             var legacyFilePath = Path.Combine(workingDirPath, GetLegacyFileNameFromUrl(url));
-            if (File.Exists(legacyFilePath))
+            if (IsFileValid(legacyFilePath))
             {
                 // Overwrite in case the destination file was created concurrently between our
                 // earlier existence check and this move operation
@@ -196,4 +196,16 @@ internal partial class ExportAssetDownloader
                 // 5 chars = 20 bits, reaches 1% collision probability at ~145 files
                 .Truncate(5)
         );
+
+    private static bool IsFileValid(string path)
+    {
+        try
+        {
+            return File.Exists(path) && new FileInfo(path).Length > 0;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
 }
