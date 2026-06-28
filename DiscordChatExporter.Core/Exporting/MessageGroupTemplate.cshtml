@@ -46,8 +46,7 @@
         ? message.Author.DisplayName
         : authorMember?.DisplayName ?? message.Author.DisplayName;
 
-    <div id="chatlog__message-container-@message.Id" class="chatlog__message-container @(message.IsPinned ? "chatlog__message-container--pinned" : null)" data-message-id="@message.Id">
-        <div class="chatlog__message">
+    <div id="chatlog__message-container-@message.Id" class="chatlog__message-container chatlog__message @(message.IsPinned ? "chatlog__message-container--pinned" : null)" data-message-id="@message.Id">
             @* System notification *@
             @if (message.IsSystemNotification)
             {
@@ -766,6 +765,5 @@
                 </div>
             }
         </div>
-    </div>
 }
 </div>

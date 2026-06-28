@@ -185,11 +185,43 @@ public partial class ConvertCommand : ICommand
             );
         }
 
+        static int GetPartitionIndex(string filePath)
+        {
+            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+            var match = System.Text.RegularExpressions.Regex.Match(
+                fileNameWithoutExt,
+                @"\[part\s*(\d+)\]$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            );
+
+            return match.Success ? int.Parse(match.Groups[1].Value) - 1 : 0;
+        }
+
+        static string GetBaseFileNameKey(string filePath)
+        {
+            var dir = Path.GetDirectoryName(filePath) ?? "";
+            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+
+            var baseName = System.Text.RegularExpressions.Regex.Replace(
+                fileNameWithoutExt,
+                @"\s*\[part\s*\d+\]$",
+                "",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            );
+
+            return Path.Combine(dir, baseName);
+        }
+
+        var groupedInputFiles = inputFilePaths
+            .GroupBy(GetBaseFileNameKey, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderBy(GetPartitionIndex).ToList())
+            .ToList();
+
         // Make sure the user does not try to convert multiple files into one file.
         // Output path must either be a directory or contain template tokens for this to work.
         var isValidOutputPath =
-            // Anything is valid when converting a single file
-            inputFilePaths.Count <= 1
+            // Anything is valid when converting a single channel
+            groupedInputFiles.Count <= 1
             // When using template tokens, assume the user knows what they're doing
             || OutputPath.Contains('%')
             // Otherwise, require an existing directory or an unambiguous directory path
@@ -208,7 +240,7 @@ public partial class ConvertCommand : ICommand
         var errorsByFile = new ConcurrentDictionary<string, string>();
         var skippedFilePaths = new ConcurrentBag<string>();
         var isSingleExplicitOutputFile =
-            inputFilePaths.Count == 1
+            groupedInputFiles.Count == 1
             && !OutputPath.Contains('%')
             && !Directory.Exists(OutputPath)
             && !Path.EndsInDirectorySeparator(OutputPath);
@@ -329,38 +361,60 @@ public partial class ConvertCommand : ICommand
             return !string.IsNullOrWhiteSpace(dirPath) ? Path.Combine(dirPath, fileName) : fileName;
         }
 
-        // Converts a single file. Progress is optional so the same code path serves both the
-        // live (interactive) progress bars and the plain line-per-file (redirected) logging.
-        async ValueTask<bool> ConvertFileAsync(
-            string inputFilePath,
+        // Converts a group of partitioned files representing a single channel.
+        async ValueTask<bool> ConvertFileGroupAsync(
+            IReadOnlyList<string> groupFilePaths,
             IProgress<Percentage>? progress,
             CancellationToken innerCancellationToken
         )
         {
+            var firstFilePath = groupFilePaths[0];
+
             if (
                 ShouldSkipUnchanged
-                && TryGetKnownOutputFilePath(inputFilePath, out var knownOutputFilePath)
-                && IsOutputNewerThanInput(inputFilePath, knownOutputFilePath)
+                && TryGetKnownOutputFilePath(firstFilePath, out var knownOutputFilePath)
+                && IsOutputNewerThanInput(firstFilePath, knownOutputFilePath)
             )
             {
                 return false;
             }
 
-            await using var inputStream = File.OpenRead(inputFilePath);
-            using var document = await JsonDocument.ParseAsync(
-                inputStream,
+            await using var firstStream = File.OpenRead(firstFilePath);
+            using var firstDoc = await JsonDocument.ParseAsync(
+                firstStream,
                 cancellationToken: innerCancellationToken
             );
 
-            var chat = ExportedChatParser.Parse(document.RootElement);
-            var request = CreateRequest(chat);
+            var firstChat = ExportedChatParser.Parse(firstDoc.RootElement);
+            var request = CreateRequest(firstChat);
 
             if (
-                ShouldSkipUnchanged && IsOutputNewerThanInput(inputFilePath, request.OutputFilePath)
+                ShouldSkipUnchanged && IsOutputNewerThanInput(firstFilePath, request.OutputFilePath)
             )
                 return false;
 
-            await new ChatConverter().ConvertAsync(chat, request, progress, innerCancellationToken);
+            var chatProviders = new Func<CancellationToken, ValueTask<ExportedChat>>[
+                groupFilePaths.Count
+            ];
+            chatProviders[0] = ct => ValueTask.FromResult(firstChat);
+            for (var i = 1; i < groupFilePaths.Count; i++)
+            {
+                var filePath = groupFilePaths[i];
+                chatProviders[i] = async ct =>
+                {
+                    await using var stream = File.OpenRead(filePath);
+                    using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+                    return ExportedChatParser.Parse(doc.RootElement);
+                };
+            }
+
+            await new ChatConverter().ConvertAsync(
+                chatProviders,
+                request,
+                progress,
+                innerCancellationToken
+            );
+
             return true;
         }
 
@@ -370,45 +424,41 @@ public partial class ConvertCommand : ICommand
             CancellationToken = cancellationToken,
         };
 
-        await console.Output.WriteLineAsync($"Converting {inputFilePaths.Count} file(s)...");
+        await console.Output.WriteLineAsync($"Converting {groupedInputFiles.Count} channel(s)...");
 
-        // When the output is redirected (e.g. piped to a log file), the live progress display
-        // degrades into endlessly reprinting the whole task tree, which bloats logs to gigabytes.
-        // Emit one concise line per completed file instead, matching the clean output you'd expect
-        // from a non-interactive run.
         if (console.IsOutputRedirected)
         {
             var completed = 0;
             var writeLock = new object();
 
             await Parallel.ForEachAsync(
-                inputFilePaths,
+                groupedInputFiles,
                 parallelOptions,
-                async (inputFilePath, innerCancellationToken) =>
+                async (fileGroup, innerCancellationToken) =>
                 {
                     var converted = true;
                     try
                     {
-                        converted = await ConvertFileAsync(
-                            inputFilePath,
+                        converted = await ConvertFileGroupAsync(
+                            fileGroup,
                             null,
                             innerCancellationToken
                         );
                         if (!converted)
-                            skippedFilePaths.Add(inputFilePath);
+                            skippedFilePaths.Add(fileGroup[0]);
                     }
                     catch (Exception ex)
                     {
-                        errorsByFile[inputFilePath] = ex.Message;
+                        errorsByFile[fileGroup[0]] = ex.Message;
                     }
 
                     var index = Interlocked.Increment(ref completed);
-                    if (converted || errorsByFile.ContainsKey(inputFilePath))
+                    if (converted || errorsByFile.ContainsKey(fileGroup[0]))
                     {
                         lock (writeLock)
                         {
                             console.Output.WriteLine(
-                                $"[{index}/{inputFilePaths.Count}] {Path.GetFileName(inputFilePath)}"
+                                $"[{index}/{groupedInputFiles.Count}] {Path.GetFileName(GetBaseFileNameKey(fileGroup[0]))}"
                             );
                         }
                     }
@@ -419,37 +469,35 @@ public partial class ConvertCommand : ICommand
         {
             await console
                 .CreateProgressTicker()
-                .HideCompleted(
-                    // When converting multiple files in parallel, hide the completed tasks
-                    // because it gets hard to visually parse them as they complete out of order.
-                    ParallelLimit > 1
-                )
+                .HideCompleted(ParallelLimit > 1)
                 .StartAsync(async ctx =>
                 {
                     await Parallel.ForEachAsync(
-                        inputFilePaths,
+                        groupedInputFiles,
                         parallelOptions,
-                        async (inputFilePath, innerCancellationToken) =>
+                        async (fileGroup, innerCancellationToken) =>
                         {
                             try
                             {
                                 var converted = true;
                                 await ctx.StartTaskAsync(
-                                    Markup.Escape(Path.GetFileName(inputFilePath)),
+                                    Markup.Escape(
+                                        Path.GetFileName(GetBaseFileNameKey(fileGroup[0]))
+                                    ),
                                     async progress =>
-                                        converted = await ConvertFileAsync(
-                                            inputFilePath,
+                                        converted = await ConvertFileGroupAsync(
+                                            fileGroup,
                                             progress.ToPercentageBased(),
                                             innerCancellationToken
                                         )
                                 );
 
                                 if (!converted)
-                                    skippedFilePaths.Add(inputFilePath);
+                                    skippedFilePaths.Add(fileGroup[0]);
                             }
                             catch (Exception ex)
                             {
-                                errorsByFile[inputFilePath] = ex.Message;
+                                errorsByFile[fileGroup[0]] = ex.Message;
                             }
                         }
                     );
@@ -460,12 +508,12 @@ public partial class ConvertCommand : ICommand
         using (console.WithForegroundColor(ConsoleColor.White))
         {
             await console.Output.WriteLineAsync(
-                $"Successfully converted {inputFilePaths.Count - errorsByFile.Count - skippedFilePaths.Count} file(s)."
+                $"Successfully converted {groupedInputFiles.Count - errorsByFile.Count - skippedFilePaths.Count} channel(s)."
             );
 
             if (!skippedFilePaths.IsEmpty)
                 await console.Output.WriteLineAsync(
-                    $"Skipped {skippedFilePaths.Count} unchanged file(s)."
+                    $"Skipped {skippedFilePaths.Count} unchanged channel(s)."
                 );
         }
 
@@ -491,7 +539,7 @@ public partial class ConvertCommand : ICommand
 
         // Fail the command only if ALL files failed to convert.
         // If only some files failed, it's okay.
-        if (errorsByFile.Count >= inputFilePaths.Count)
+        if (errorsByFile.Count >= groupedInputFiles.Count)
             throw new CommandException("Conversion failed.");
     }
 }

@@ -126,7 +126,7 @@ public partial class ExportRequest
     // renamed to the freshly-computed path (e.g. because something else already occupies it);
     // it keeps writing to the file the channel's history is already in, instead of starting a
     // new, disconnected file under the freshly-computed name.
-    internal void RedirectOutputFilePath(string existingOutputFilePath)
+    public void RedirectOutputFilePath(string existingOutputFilePath)
     {
         OutputFilePath = existingOutputFilePath;
         OutputDirPath = Path.GetDirectoryName(OutputFilePath)!;

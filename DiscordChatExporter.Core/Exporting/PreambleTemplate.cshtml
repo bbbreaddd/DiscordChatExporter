@@ -122,6 +122,44 @@
             scroll-behavior: smooth;
         }
 
+        .chatlog__pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 16px;
+            margin: 20px 0;
+            padding: 12px;
+            background-color: @Themed("#2f3136", "#f2f3f5");
+            border-radius: 8px;
+        }
+
+        .chatlog__pagination-link {
+            color: @Themed("#00aff4", "#0068e0");
+            text-decoration: none;
+            font-weight: 600;
+            padding: 6px 16px;
+            border-radius: 4px;
+            background-color: @Themed("#202225", "#e3e5e8");
+            transition: background-color 0.2s, color 0.2s;
+        }
+
+        .chatlog__pagination-link:hover {
+            background-color: @Themed("#35383e", "#dbdee1");
+            text-decoration: none;
+        }
+
+        .chatlog__pagination-link--disabled {
+            color: @Themed("#4f545c", "#949ba4");
+            background-color: @Themed("#202225", "#e3e5e8");
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .chatlog__pagination-current {
+            color: @Themed("#dcddde", "#23262a");
+            font-weight: 500;
+        }
+
         a {
             color: @Themed("#00aff4", "#0068e0");
             text-decoration: none;
@@ -1086,6 +1124,10 @@
         }
     </div>
 </div>
+
+<!--wmm:ignore-->
+<!--dce-pagination-header-->
+<!--/wmm:ignore-->
 
 @* Preamble cuts off at this point *@
 <!--wmm:ignore-->

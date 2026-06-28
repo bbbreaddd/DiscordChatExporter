@@ -257,4 +257,84 @@ public class ConvertSpecs
         content.Should().Contain("Channel: Text Channels / general / thread-topic");
         content.Should().Contain("This is a thread message.");
     }
+
+    [Fact]
+    public async Task I_can_convert_a_JSON_export_to_the_html_format_with_partitioning_and_pagination()
+    {
+        // Arrange
+        using var dir = TempDirectory.Create();
+        var filePath = Path.Combine(dir.Path, "output.html");
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [SampleExportFilePath],
+            OutputPath = filePath,
+            ExportFormat = ExportFormat.HtmlDark,
+            PartitionLimit = PartitionLimit.Parse("1"),
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        // Assert
+        Directory.EnumerateFiles(dir.Path, "output*").Should().HaveCount(3);
+
+        var part1 = await File.ReadAllTextAsync(Path.Combine(dir.Path, "output.html"));
+        var part2 = await File.ReadAllTextAsync(Path.Combine(dir.Path, "output [part 2].html"));
+        var part3 = await File.ReadAllTextAsync(Path.Combine(dir.Path, "output [part 3].html"));
+
+        part1.Should().Contain("class=\"chatlog__pagination\"");
+        part1.Should().Contain("Page 1 of 3");
+        part1.Should().Contain("href=\"output%20%5Bpart%202%5D.html\"");
+
+        part2.Should().Contain("class=\"chatlog__pagination\"");
+        part2.Should().Contain("Page 2 of 3");
+        part2.Should().Contain("href=\"output.html\"");
+        part2.Should().Contain("href=\"output%20%5Bpart%203%5D.html\"");
+
+        part3.Should().Contain("class=\"chatlog__pagination\"");
+        part3.Should().Contain("Page 3 of 3");
+        part3.Should().Contain("href=\"output%20%5Bpart%202%5D.html\"");
+    }
+
+    [Fact]
+    public async Task I_can_convert_a_partitioned_JSON_export_and_merge_them_correctly()
+    {
+        // Arrange
+        using var tempDir = TempDirectory.Create();
+
+        // Write two partition files: general.json and general [part 2].json
+        var part1Path = Path.Combine(tempDir.Path, "general.json");
+        var part2Path = Path.Combine(tempDir.Path, "general [part 2].json");
+
+        var baseJson = await File.ReadAllTextAsync(SampleExportFilePath);
+
+        await File.WriteAllTextAsync(part1Path, baseJson);
+        await File.WriteAllTextAsync(part2Path, baseJson);
+
+        var outputPath = Path.Combine(tempDir.Path, "output.html");
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [part1Path, part2Path],
+            OutputPath = outputPath,
+            ExportFormat = ExportFormat.HtmlDark,
+            PartitionLimit = PartitionLimit.Parse("3"),
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        // Assert
+        Directory.EnumerateFiles(tempDir.Path, "output*").Should().HaveCount(2);
+
+        var html1 = await File.ReadAllTextAsync(Path.Combine(tempDir.Path, "output.html"));
+        var html2 = await File.ReadAllTextAsync(Path.Combine(tempDir.Path, "output [part 2].html"));
+
+        html1.Should().Contain("class=\"chatlog__pagination\"");
+        html1.Should().Contain("Page 1 of 2");
+
+        html2.Should().Contain("class=\"chatlog__pagination\"");
+        html2.Should().Contain("Page 2 of 2");
+    }
 }

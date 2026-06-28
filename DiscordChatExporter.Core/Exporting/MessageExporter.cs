@@ -95,6 +95,115 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
             _ = await InitializeWriterAsync();
 
         await UninitializeWriterAsync();
+
+        // Add pagination to split HTML files
+        await PostProcessHtmlPaginationAsync();
+    }
+
+    private async ValueTask PostProcessHtmlPaginationAsync()
+    {
+        if (
+            context.Request.Format != ExportFormat.HtmlDark
+            && context.Request.Format != ExportFormat.HtmlLight
+        )
+            return;
+
+        var basePathToUse = outputFilePathOverride ?? context.Request.OutputFilePath;
+
+        if (_partitionIndex <= 0)
+        {
+            // Only 1 partition exists. Clean up the pagination comments.
+            var path = GetPartitionFilePath(basePathToUse, 0);
+            if (File.Exists(path))
+            {
+                await ReplacePlaceholdersAsync(path, "", "");
+            }
+            return;
+        }
+
+        var totalParts = _partitionIndex + 1;
+
+        for (var j = 0; j < totalParts; j++)
+        {
+            var path = GetPartitionFilePath(basePathToUse, j);
+            if (!File.Exists(path))
+                continue;
+
+            var prevLink =
+                j > 0
+                    ? $"<a class=\"chatlog__pagination-link\" href=\"{Uri.EscapeDataString(Path.GetFileName(GetPartitionFilePath(basePathToUse, j - 1)))}\">Previous Page</a>"
+                    : "<span class=\"chatlog__pagination-link chatlog__pagination-link--disabled\">Previous Page</span>";
+
+            var nextLink =
+                j < _partitionIndex
+                    ? $"<a class=\"chatlog__pagination-link\" href=\"{Uri.EscapeDataString(Path.GetFileName(GetPartitionFilePath(basePathToUse, j + 1)))}\">Next Page</a>"
+                    : "<span class=\"chatlog__pagination-link chatlog__pagination-link--disabled\">Next Page</span>";
+
+            var pageInfo =
+                $"<span class=\"chatlog__pagination-current\">Page {j + 1} of {totalParts}</span>";
+
+            var paginationHtml =
+                $@"
+<div class=""chatlog__pagination"">
+    {prevLink}
+    {pageInfo}
+    {nextLink}
+</div>
+";
+
+            await ReplacePlaceholdersAsync(path, paginationHtml, paginationHtml);
+        }
+    }
+
+    private static async ValueTask ReplacePlaceholdersAsync(
+        string filePath,
+        string headerHtml,
+        string footerHtml
+    )
+    {
+        var tempPath = filePath + ".post.tmp";
+        try
+        {
+            using (var reader = new StreamReader(filePath))
+            using (var writer = new StreamWriter(tempPath))
+            {
+                string? line;
+                while ((line = await reader.ReadLineAsync()) is not null)
+                {
+                    if (line.Contains("<!--dce-pagination-header-->", StringComparison.Ordinal))
+                    {
+                        await writer.WriteLineAsync(headerHtml);
+                    }
+                    else if (
+                        line.Contains("<!--dce-pagination-footer-->", StringComparison.Ordinal)
+                    )
+                    {
+                        await writer.WriteLineAsync(footerHtml);
+                    }
+                    else
+                    {
+                        await writer.WriteLineAsync(line);
+                    }
+                }
+            }
+
+            File.Move(tempPath, filePath, true);
+        }
+        catch
+        {
+            if (File.Exists(tempPath))
+            {
+                try
+                {
+                    File.Delete(tempPath);
+                }
+                catch
+                {
+                    // Ignore
+                }
+            }
+            throw;
+        }
     }
 }
 

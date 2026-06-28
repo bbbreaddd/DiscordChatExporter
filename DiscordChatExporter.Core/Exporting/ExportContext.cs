@@ -147,24 +147,14 @@ internal class ExportContext(
     {
         var relativeFilePath = Path.GetRelativePath(Request.OutputDirPath, filePath);
 
-        // Prefer the relative path so that the export package can be copied around without breaking references.
-        // However, if the assets directory lies outside the export directory, use the absolute path instead.
-        var shouldUseAbsoluteFilePath =
-            relativeFilePath.StartsWith(
-                ".." + Path.DirectorySeparatorChar,
-                StringComparison.Ordinal
-            )
-            || relativeFilePath.StartsWith(
-                ".." + Path.AltDirectorySeparatorChar,
-                StringComparison.Ordinal
-            );
-
-        var optimalFilePath = shouldUseAbsoluteFilePath ? filePath : relativeFilePath;
-
+        // Always prefer a relative path — even one that traverses upward with ".." — because
+        // relative paths work correctly when the HTML is served by any web server regardless of
+        // mount point. Absolute file:// URIs (the old fallback for out-of-tree asset dirs) are
+        // blocked by browsers when the page is loaded over HTTP due to CORS restrictions.
         // For HTML, the path needs to be properly formatted
         return Request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight
-            ? Url.EncodeFilePath(optimalFilePath)
-            : optimalFilePath;
+            ? Url.EncodeFilePath(relativeFilePath)
+            : relativeFilePath;
     }
 
     public async ValueTask<string> ResolveAssetUrlAsync(
