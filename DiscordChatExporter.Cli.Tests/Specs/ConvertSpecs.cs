@@ -211,6 +211,66 @@ public class ConvertSpecs
     }
 
     [Fact]
+    public async Task I_can_skip_an_unchanged_JSON_export_with_a_template_output_path()
+    {
+        // Arrange
+        using var inputDir = TempDirectory.Create();
+        using var outputDir = TempDirectory.Create();
+
+        var inputFilePath = Path.Combine(inputDir.Path, "watcher-input.json");
+        await File.WriteAllTextAsync(
+            inputFilePath,
+            await File.ReadAllTextAsync(SampleExportFilePath)
+        );
+
+        var outputPath =
+            outputDir.Path
+            + Path.DirectorySeparatorChar
+            + "%G"
+            + Path.DirectorySeparatorChar
+            + "%T"
+            + Path.DirectorySeparatorChar
+            + "%C"
+            + Path.DirectorySeparatorChar;
+
+        await new ConvertCommand
+        {
+            InputPaths = [inputFilePath],
+            OutputPath = outputPath,
+            ExportFormat = ExportFormat.PlainText,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        var convertedFilePath = Path.Combine(
+            outputDir.Path,
+            "Test Guild",
+            "Text Channels",
+            "general",
+            "Test Guild - Text Channels - general [1063903591533404161].txt"
+        );
+
+        await File.WriteAllTextAsync(convertedFilePath, "already converted");
+        File.SetLastWriteTimeUtc(convertedFilePath, DateTime.UtcNow.AddMinutes(1));
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [inputFilePath],
+            OutputPath = outputPath,
+            ExportFormat = ExportFormat.PlainText,
+            ShouldSkipUnchanged = true,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        var content = await File.ReadAllTextAsync(convertedFilePath);
+
+        // Assert
+        content.Should().Be("already converted");
+    }
+
+    [Fact]
     public async Task I_can_convert_a_JSON_export_with_a_message_filter()
     {
         // Arrange

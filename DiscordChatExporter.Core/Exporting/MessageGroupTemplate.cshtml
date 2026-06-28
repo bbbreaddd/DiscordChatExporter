@@ -132,9 +132,7 @@
                     </span>
 
                     @* Timestamp *@
-                    <span class="chatlog__system-notification-timestamp" title="@FormatDate(message.Timestamp, "f")">
-                        <a href="#chatlog__message-container-@message.Id">@FormatDate(message.Timestamp)</a>
-                    </span>
+                    <a class="chatlog__system-notification-timestamp" href="#chatlog__message-container-@message.Id" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
                 </div>
             }
             // Regular message
@@ -241,18 +239,18 @@
                             }
 
                             @* Timestamp *@
-                            <span class="chatlog__timestamp" title="@FormatDate(message.Timestamp, "f")"><a href="#chatlog__message-container-@message.Id">@FormatDate(message.Timestamp)</a></span>
+                            <a class="chatlog__timestamp" href="#chatlog__message-container-@message.Id" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
                         </div>
                     }
 
                     @* Content *@
                     @if ((!string.IsNullOrWhiteSpace(message.Content) && !message.IsContentHidden()) || message.EditedTimestamp is not null)
                     {
-                        <div class="chatlog__content chatlog__markdown">
+                        <div class="chatlog__content chatlog__markdown chatlog__markdown-preserve">
                             @* Text *@
                             @if (!string.IsNullOrWhiteSpace(message.Content) && !message.IsContentHidden())
                             {
-                                <span class="chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatMarkdownAsync(message.Content))<!--/wmm:ignore--></span>
+                                <!--wmm:ignore-->@(await FormatMarkdownAsync(message.Content))<!--/wmm:ignore-->
                             }
 
                             @* Edited timestamp *@
@@ -277,8 +275,8 @@
                             @* Forwarded content *@
                             @if (!string.IsNullOrWhiteSpace(message.ForwardedMessage.Content))
                             {
-                                <div class="chatlog__forwarded-content chatlog__markdown">
-                                    <span class="chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatMarkdownAsync(message.ForwardedMessage.Content))<!--/wmm:ignore--></span>
+                                <div class="chatlog__forwarded-content chatlog__markdown chatlog__markdown-preserve">
+                                    <!--wmm:ignore-->@(await FormatMarkdownAsync(message.ForwardedMessage.Content))<!--/wmm:ignore-->
                                 </div>
                             }
 

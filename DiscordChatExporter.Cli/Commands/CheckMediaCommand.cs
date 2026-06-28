@@ -121,6 +121,21 @@ public partial class CheckMediaCommand : DiscordCommandBase
             );
         }
 
+        inputFilePaths.RemoveAll(path =>
+            string.Equals(
+                Path.GetFileName(path),
+                ".discord_backup_manifest.json",
+                StringComparison.OrdinalIgnoreCase
+            )
+        );
+
+        if (inputFilePaths.Count <= 0)
+        {
+            throw new CommandException(
+                "No JSON export files found at the specified input path(s)."
+            );
+        }
+
         await console.Output.WriteLineAsync(
             $"Checking {inputFilePaths.Count} file(s) for missing media..."
         );

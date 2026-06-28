@@ -245,11 +245,6 @@ public partial class ConvertCommand : ICommand
             && !Directory.Exists(OutputPath)
             && !Path.EndsInDirectorySeparator(OutputPath);
 
-        var knownOutputFilePathsByName =
-            ShouldSkipUnchanged && !isSingleExplicitOutputFile
-                ? GetKnownOutputFilePathsByName(OutputPath, ExportFormat)
-                : new Dictionary<string, string>();
-
         ExportRequest CreateRequest(ExportedChat chat) =>
             new(
                 chat.Guild,
@@ -279,54 +274,8 @@ public partial class ConvertCommand : ICommand
                 return true;
             }
 
-            var outputFileName = Path.ChangeExtension(
-                Path.GetFileName(inputFilePath),
-                ExportFormat.GetFileExtension()
-            );
-
-            return knownOutputFilePathsByName.TryGetValue(outputFileName, out outputFilePath!);
-        }
-
-        static Dictionary<string, string> GetKnownOutputFilePathsByName(
-            string outputPath,
-            ExportFormat format
-        )
-        {
-            var searchRootDirPath = GetOutputSearchRootDirPath(outputPath);
-            if (!Directory.Exists(searchRootDirPath))
-                return [];
-
-            var searchPattern = "*." + format.GetFileExtension();
-
-            return Directory
-                .EnumerateFiles(searchRootDirPath, searchPattern, SearchOption.AllDirectories)
-                .GroupBy(Path.GetFileName, StringComparer.Ordinal)
-                .ToDictionary(
-                    group => group.Key!,
-                    group => group.OrderByDescending(File.GetLastWriteTimeUtc).First(),
-                    StringComparer.Ordinal
-                );
-        }
-
-        static string GetOutputSearchRootDirPath(string outputPath)
-        {
-            var templateTokenIndex = outputPath.IndexOf('%');
-            if (templateTokenIndex < 0)
-            {
-                return Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)
-                    ? outputPath
-                    : Path.GetDirectoryName(outputPath) ?? Directory.GetCurrentDirectory();
-            }
-
-            var stablePrefix = outputPath[..templateTokenIndex];
-            var lastSeparatorIndex = stablePrefix.LastIndexOfAny([
-                Path.DirectorySeparatorChar,
-                Path.AltDirectorySeparatorChar,
-            ]);
-
-            return lastSeparatorIndex >= 0
-                ? stablePrefix[..(lastSeparatorIndex + 1)]
-                : Path.GetPathRoot(outputPath) ?? Directory.GetCurrentDirectory();
+            outputFilePath = "";
+            return false;
         }
 
         static bool IsOutputNewerThanInput(string inputFilePath, string outputFilePath)
