@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using System.Threading;
 using System.Threading.Tasks;
 using Polly;
 using Polly.Retry;
@@ -13,6 +14,35 @@ namespace DiscordChatExporter.Core.Utils;
 
 public static class Http
 {
+    // Invoked whenever a request is about to be delayed, either because Discord's advisory
+    // rate limit was hit (see DiscordClient) or because a request failed and is being
+    // retried. Lets the CLI surface *why* an export looks stalled instead of just freezing
+    // silently for up to 60 seconds at a time.
+    //
+    // This is scoped via AsyncLocal rather than a plain static event so that with multiple
+    // channels exporting concurrently (--parallel > 1), each channel's own async call stack
+    // only observes throttling caused by its *own* requests. A shared event would notify every
+    // concurrently-running channel of every throttle anywhere in the process, which previously
+    // caused channels that were never themselves throttled to have that dead time subtracted
+    // from their fetch-rate calculation anyway, sometimes driving it to a wildly inflated number.
+    private static readonly AsyncLocal<Action<TimeSpan, string>?> _throttledHandler = new();
+
+    public static IDisposable OnThrottled(Action<TimeSpan, string> handler)
+    {
+        var previousHandler = _throttledHandler.Value;
+        _throttledHandler.Value = handler;
+        return new RestoreThrottledHandler(previousHandler);
+    }
+
+    internal static void NotifyThrottled(TimeSpan delay, string reason) =>
+        _throttledHandler.Value?.Invoke(delay, reason);
+
+    private sealed class RestoreThrottledHandler(Action<TimeSpan, string>? previousHandler)
+        : IDisposable
+    {
+        public void Dispose() => _throttledHandler.Value = previousHandler;
+    }
+
     public static HttpClient Client { get; } = new();
 
     private static bool IsRetryableStatusCode(HttpStatusCode statusCode) =>
@@ -70,6 +100,16 @@ public static class Http
 
                         var delay = Math.Min(60, Math.Pow(2, args.AttemptNumber) + 1);
                         return ValueTask.FromResult<TimeSpan?>(TimeSpan.FromSeconds(delay));
+                    },
+                    OnRetry = args =>
+                    {
+                        var reason =
+                            args.Outcome.Result?.StatusCode == HttpStatusCode.TooManyRequests
+                                ? "rate limited by Discord"
+                                : "request failed, retrying";
+
+                        NotifyThrottled(args.RetryDelay, reason);
+                        return default;
                     },
                 }
             )

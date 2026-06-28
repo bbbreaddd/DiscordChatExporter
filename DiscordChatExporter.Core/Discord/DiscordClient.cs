@@ -5,7 +5,9 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using DiscordChatExporter.Core.Discord.Data;
@@ -62,6 +64,22 @@ public class DiscordClient
         int tokenIndex,
         TokenKind tokenKind,
         CancellationToken cancellationToken = default
+    ) =>
+        await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, url)),
+            tokenIndex,
+            tokenKind,
+            cancellationToken
+        );
+
+    // The request is created via a factory because the resilience pipeline may invoke this more
+    // than once (retries), and an HttpRequestMessage (and its content) can only be sent a single
+    // time, so each attempt needs a fresh instance.
+    private async ValueTask<HttpResponseMessage> SendAsync(
+        Func<HttpRequestMessage> createRequest,
+        int tokenIndex,
+        TokenKind tokenKind,
+        CancellationToken cancellationToken = default
     )
     {
         var token = _tokens[tokenIndex];
@@ -69,7 +87,7 @@ public class DiscordClient
         return await Http.ResponseResiliencePipeline.ExecuteAsync(
             async innerCancellationToken =>
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, url));
+                using var request = createRequest();
 
                 // Don't validate because the token can have special characters
                 // https://github.com/Tyrrrz/DiscordChatExporter/issues/828
@@ -117,6 +135,7 @@ public class DiscordClient
                             // is not actually enforced by the server. So we cap it at a reasonable value.
                             .Clamp(TimeSpan.Zero, TimeSpan.FromSeconds(60));
 
+                        Http.NotifyThrottled(delay, "rate limited by Discord");
                         await Task.Delay(delay, innerCancellationToken);
                     }
                 }
@@ -181,6 +200,15 @@ public class DiscordClient
     private async ValueTask<HttpResponseMessage> GetResponseAsync(
         string url,
         CancellationToken cancellationToken = default
+    ) =>
+        await SendAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, url)),
+            cancellationToken
+        );
+
+    private async ValueTask<HttpResponseMessage> SendAsync(
+        Func<HttpRequestMessage> createRequest,
+        CancellationToken cancellationToken = default
     )
     {
         HttpResponseMessage? lastResponse = null;
@@ -195,8 +223,8 @@ public class DiscordClient
             if (tokenKind is null)
                 continue;
 
-            var response = await GetResponseAsync(
-                url,
+            var response = await SendAsync(
+                createRequest,
                 tokenIndex,
                 tokenKind.Value,
                 cancellationToken
@@ -295,6 +323,92 @@ public class DiscordClient
         return response.IsSuccessStatusCode
             ? await response.Content.ReadAsJsonAsync(cancellationToken)
             : null;
+    }
+
+    private async ValueTask<JsonElement> PostJsonResponseAsync(
+        string url,
+        string jsonBody,
+        CancellationToken cancellationToken = default
+    )
+    {
+        using var response = await SendAsync(
+            () =>
+                new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, url))
+                {
+                    Content = new StringContent(jsonBody, Encoding.UTF8, "application/json"),
+                },
+            cancellationToken
+        );
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new DiscordChatExporterException(
+                $"""
+                Request to '{url}' failed: {response
+                    .StatusCode.ToString()
+                    .SeparateWords(' ')
+                    .ToLowerInvariant()}.
+                Response content: {await response.Content.ReadAsStringAsync(cancellationToken)}
+                """,
+                true
+            );
+        }
+
+        return await response.Content.ReadAsJsonAsync(cancellationToken);
+    }
+
+    private static bool IsRefreshableUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && (
+            string.Equals(uri.Host, "cdn.discordapp.com", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(uri.Host, "media.discordapp.net", StringComparison.OrdinalIgnoreCase)
+        );
+
+    // Refreshes expired Discord CDN links (cdn.discordapp.com / media.discordapp.net) via the
+    // official 'refresh-urls' endpoint, returning a map of original -> freshly-signed URL. Only
+    // Discord-hosted URLs are refreshable; anything else is ignored. Used to recover assets whose
+    // stored signed URLs have since expired so that they can be downloaded again.
+    public async ValueTask<IReadOnlyDictionary<string, string>> RefreshAttachmentUrlsAsync(
+        IReadOnlyList<string> urls,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var refreshable = urls.Where(IsRefreshableUrl).Distinct(StringComparer.Ordinal).ToArray();
+
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        // The endpoint accepts only a limited number of URLs per request.
+        foreach (var batch in refreshable.Chunk(50))
+        {
+            // Built via the JSON DOM rather than the serializer because reflection-based
+            // serialization is disabled in this (trimming-friendly) build.
+            var attachmentUrls = new JsonArray();
+            foreach (var url in batch)
+                attachmentUrls.Add(JsonValue.Create(url));
+
+            var body = new JsonObject { ["attachment_urls"] = attachmentUrls }.ToJsonString();
+
+            var json = await PostJsonResponseAsync(
+                "attachments/refresh-urls",
+                body,
+                cancellationToken
+            );
+
+            var refreshedUrls = json.GetPropertyOrNull("refreshed_urls");
+            if (refreshedUrls is null)
+                continue;
+
+            foreach (var item in refreshedUrls.Value.EnumerateArray())
+            {
+                var original = item.GetPropertyOrNull("original")?.GetNonWhiteSpaceStringOrNull();
+                var refreshed = item.GetPropertyOrNull("refreshed")?.GetNonWhiteSpaceStringOrNull();
+
+                if (original is not null && refreshed is not null)
+                    result[original] = refreshed;
+            }
+        }
+
+        return result;
     }
 
     public async ValueTask<Application> GetApplicationAsync(

@@ -34,7 +34,8 @@ internal class ExportContext(
 
     private readonly ExportAssetDownloader _assetDownloader = new(
         request.AssetsDirPath,
-        request.ShouldReuseAssets
+        request.ShouldReuseAssets,
+        request.IsOfflineAssetMode
     );
 
     public DiscordClient? Discord { get; } = discord;
@@ -178,6 +179,11 @@ internal class ExportContext(
         {
             var filePath = await _assetDownloader.DownloadAsync(url, cancellationToken);
 
+            // Offline mode (used by 'convert') never downloads: if the asset isn't already cached,
+            // there's no local file to point at, so keep the original remote URL.
+            if (filePath is null)
+                return url;
+
             // Caching-only mode warms the asset directory as a side effect, but keeps the
             // original (remote) URL in the export so it stays portable and can be safely
             // reused as a source for a later 'convert' run pointed at the same asset directory.
@@ -212,7 +218,7 @@ internal class ExportContext(
         try
         {
             var filePath = await _assetDownloader.DownloadAsync(url, cancellationToken);
-            return FormatDownloadedAssetPath(filePath);
+            return filePath is not null ? FormatDownloadedAssetPath(filePath) : null;
         }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
         {

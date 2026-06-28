@@ -117,8 +117,8 @@ public class ConvertRelocationSpecs
 
         var sampleJson = await File.ReadAllTextAsync(SampleExportFilePath);
         var rangedJson = sampleJson.Replace(
-            "\"after\": null",
-            "\"after\": \"2023-06-13T00:00:00+00:00\""
+            "\"before\": null",
+            "\"before\": \"2023-06-13T00:00:00+00:00\""
         );
         await File.WriteAllTextAsync(rangedInput.Path, rangedJson);
 
@@ -142,7 +142,7 @@ public class ConvertRelocationSpecs
         Directory
             .GetFiles(outputDir.Path, "*.txt", SearchOption.TopDirectoryOnly)
             .Should()
-            .Contain(path => Path.GetFileName(path).Contains(" (after ", StringComparison.Ordinal))
+            .Contain(path => Path.GetFileName(path).Contains(" (before ", StringComparison.Ordinal))
             .And.HaveCount(2);
     }
 

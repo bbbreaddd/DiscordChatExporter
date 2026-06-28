@@ -52,6 +52,10 @@ public partial class ExportRequest
 
     public bool ShouldCacheAssetsOnly { get; }
 
+    // When set, asset resolution is purely local: cached files are referenced, but anything not
+    // already on disk keeps its original remote URL instead of being downloaded. Used by 'convert'.
+    public bool IsOfflineAssetMode { get; }
+
     public string? Locale { get; }
 
     public CultureInfo? CultureInfo { get; }
@@ -77,7 +81,8 @@ public partial class ExportRequest
         string? locale,
         bool isUtcNormalizationEnabled,
         bool isIncremental = false,
-        bool shouldCacheAssetsOnly = false
+        bool shouldCacheAssetsOnly = false,
+        bool isOfflineAssetMode = false
     )
     {
         Guild = guild;
@@ -92,6 +97,7 @@ public partial class ExportRequest
         ShouldDownloadAssets = shouldDownloadAssets;
         ShouldReuseAssets = shouldReuseAssets;
         ShouldCacheAssetsOnly = shouldCacheAssetsOnly;
+        IsOfflineAssetMode = isOfflineAssetMode;
         Locale = locale;
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
         IsIncremental = isIncremental;
@@ -156,29 +162,13 @@ public partial class ExportRequest
             .Append(']');
 
         // Date range
-        if (after is not null || before is not null)
+        if (before is not null)
         {
-            buffer.Append(' ').Append('(');
-
-            // Both 'after' and 'before' are set
-            if (after is not null && before is not null)
-            {
-                buffer.Append(
-                    $"{after.Value.ToDate():yyyy-MM-dd} to {before.Value.ToDate():yyyy-MM-dd}"
-                );
-            }
-            // Only 'after' is set
-            else if (after is not null)
-            {
-                buffer.Append($"after {after.Value.ToDate():yyyy-MM-dd}");
-            }
-            // Only 'before' is set
-            else if (before is not null)
-            {
-                buffer.Append($"before {before.Value.ToDate():yyyy-MM-dd}");
-            }
-
-            buffer.Append(')');
+            buffer
+                .Append(' ')
+                .Append('(')
+                .Append($"before {before.Value.ToDate():yyyy-MM-dd}")
+                .Append(')');
         }
 
         // File extension

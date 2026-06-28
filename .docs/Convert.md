@@ -42,6 +42,13 @@ Use `--parallel` to convert multiple files at the same time:
 ./DiscordChatExporter.Cli convert -i "C:\Discord Exports\json" -f HtmlDark -o "C:\Discord Exports\html\" --parallel 4
 ```
 
+Use `--skip-unchanged` on repeat runs to leave existing outputs alone when they are newer than
+the source JSON file:
+
+```console
+./DiscordChatExporter.Cli convert -i "C:\Discord Exports\json" -f HtmlDark -o "C:\Discord Exports\html\" --skip-unchanged
+```
+
 ## Output path templating
 
 `-o|--output` supports the same template tokens as the `export` command, based on the guild and
@@ -72,7 +79,8 @@ channel metadata stored in each JSON file:
 - `-p|--partition` - split the output into partitions, e.g. `-p 100` or `-p 10mb`
 - `--filter` - only include messages matching a [message filter](Message-filters.md)
 - `--markdown` - process markdown, mentions, and other special tokens (default: `true`)
-- `--media` / `--reuse-media` / `--media-dir` - download assets referenced by the export
+- `--media` / `--reuse-media` / `--media-dir` - reference locally cached assets
+- `--skip-unchanged` - skip files whose existing output is newer than the input JSON export
 - `--locale` - locale used to format dates and numbers
 - `--utc` - normalize all timestamps to UTC+0
 
@@ -97,6 +105,6 @@ Discord, a few things can't be reproduced perfectly:
   stored separately under `parentCategory`/`parentCategoryId`. JSON exports created before this
   field was added won't have it, so the "Channel:" header in `PlainText`/`Csv` output, and the
   breadcrumb in `Html`, will show one fewer level than a live export of the same thread.
-- Attachment, embed, and avatar URLs are copied as-is from the JSON. Discord's CDN URLs include
-  a short-lived signature that expires (~24h after the original export), so links may no longer
-  work by the time you run `convert`. Use `--media` to download a local copy instead.
+- Attachment, embed, and avatar URLs are copied as-is from the JSON unless `--media` can find
+  an already-cached local copy. Discord's CDN URLs include a short-lived signature that expires
+  (~24h after the original export), so links may no longer work by the time you run `convert`.

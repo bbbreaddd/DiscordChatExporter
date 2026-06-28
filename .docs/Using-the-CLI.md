@@ -59,6 +59,36 @@ For example, to figure out how to use the `export` command, run:
 ./DiscordChatExporter.Cli export --help
 ```
 
+## Authentication
+
+Most commands need an authentication token, provided with `-t|--token`, or through the
+`DISCORD_TOKEN` environment variable (handy for scripts, so the token doesn't end up in your shell
+history or process list).
+
+If you have more than one token (e.g. a personal account plus a bot, or several bots), put them in
+a text file, one per line (`#` starts a comment), and pass it with `--token-file` instead. The
+tokens are used as fallbacks for one another: if a request fails because the active token is
+invalid, lacks access to the resource, or is stuck being rate limited, DCE automatically retries
+with the next token in the file.
+
+```console
+./DiscordChatExporter.Cli export --token-file tokens.txt -c 53555
+```
+
+#### Rate limits
+
+By default, DCE respects Discord's advisory rate limits, which are deliberately stricter than what
+the server actually enforces, in order to minimize the chance of your account/bot getting flagged.
+If a request can't go through yet, DCE will pause (visibly, in the CLI's progress display) until
+it's safe to continue. To prioritize speed instead, and only back off when Discord returns an
+actual hard rate limit error (HTTP 429), disable this with `--respect-rate-limits false`. Use this
+with caution, especially on a user token, since it increases the risk of getting rate limited or
+flagged for abuse.
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --respect-rate-limits false
+```
+
 ## Export a specific channel
 
 You can quickly export with DCE's default settings by using just `-t token` and `-c channelid`.
@@ -166,6 +196,18 @@ same folder. Using this option can speed up future exports. This option requires
 ./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --media --reuse-media
 ```
 
+#### Caching assets without rewriting URLs
+
+`--cache-media` downloads assets the same way `--media` does, but keeps the original Discord CDN
+URLs in the export instead of replacing them with local file paths. This is useful for warming a
+media cache ahead of time (e.g. before running [`convert`](Convert.md) with `--media --reuse-media`
+against the same `--media-dir`), without making the export's URLs depend on local paths. It cannot
+be combined with `--media`.
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 -f Json --cache-media --media-dir "C:\Discord Media"
+```
+
 #### Changing the media directory
 
 By default, the media directory is created alongside the exported chat. You can change this by using `--media-dir` and
@@ -224,6 +266,38 @@ Use `--filter` to filter what messages are included in the export.
 
 Documentation on message filter syntax can be found [here](https://github.com/Tyrrrz/DiscordChatExporter/blob/prime/.docs/Message-filters.md).
 
+#### Incremental exports
+
+`--incremental` appends newly posted messages to an existing JSON export instead of re-exporting
+the whole channel from scratch. It only works with the JSON format (`-f Json`), and keeps a small
+manifest file alongside the output to remember where each channel left off. This is the option to
+reach for when re-running the same export repeatedly (e.g. on a schedule):
+
+```console
+./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 -f Json -o "C:\Discord Exports\" --incremental
+```
+
+If you need other formats too, export incrementally to JSON, then use [`convert`](Convert.md) to
+derive `HtmlDark`/`PlainText`/etc. from it -- that way the (slower) Discord API calls only ever
+fetch new messages, and the format conversion stays a fast, offline step.
+
+#### Exporting messages in reverse order
+
+By default, messages are fetched oldest-first. Use `--reverse` to fetch newest-first instead.
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --reverse
+```
+
+#### Normalizing timestamps to UTC
+
+By default, message timestamps are shown in their original timezone (as recorded by Discord). Use
+`--utc` to normalize every timestamp in the export to UTC+0 instead.
+
+```console
+./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --utc
+```
+
 ### Export channels from a specific server
 
 To export all channels in a specific server, use the `exportguild` command and provide the server ID through the `-g|--guild` option:
@@ -252,6 +326,16 @@ voice channels, use `--include-vc false`.
 ./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 --include-vc false
 ```
 
+#### Exporting in parallel
+
+By default, channels are exported one at a time. Use `--parallel` to export multiple channels
+concurrently, which can significantly speed up large servers -- at the cost of making more
+simultaneous requests, which increases the chance of getting rate limited.
+
+```console
+./DiscordChatExporter.Cli exportguild -t "mfa.Ifrn" -g 21814 --parallel 4
+```
+
 ### Export all channels
 
 To export all accessible channels, use the `exportall` command:
@@ -268,6 +352,26 @@ To exclude DMs, add the `--include-dm false` option.
 ./DiscordChatExporter.Cli exportall -t "mfa.Ifrn" --include-dm false
 ```
 
+#### Excluding server channels
+
+To export only DMs and skip server channels, add the `--include-guilds false` option.
+
+```console
+./DiscordChatExporter.Cli exportall -t "mfa.Ifrn" --include-guilds false
+```
+
+#### Exporting from a Discord data package
+
+If you've requested your data from Discord (User Settings → Privacy & Safety → Request all of my
+data), you can point `--data-package` at the downloaded ZIP file to only export the channels
+referenced in it, instead of pulling the full list of currently-accessible channels from the API.
+This is the only way to export channels/servers you no longer have access to, as long as you were
+still a member when the data package was generated.
+
+```console
+./DiscordChatExporter.Cli exportall -t "mfa.Ifrn" --data-package "package.zip"
+```
+
 ### Convert an existing JSON export to another format
 
 To convert a previously exported JSON file into `PlainText`, `Csv`, `HtmlDark`, or `HtmlLight`,
@@ -276,6 +380,9 @@ use the `convert` command. This works offline and doesn't require a token:
 ```console
 ./DiscordChatExporter.Cli convert -i export.json -f HtmlDark -o export.html
 ```
+
+Use `--skip-unchanged` for repeat batch conversions to skip outputs that are already newer than
+their source JSON exports.
 
 See [Converting existing exports](Convert.md) for more details, including batch conversion and
 output path templating.
@@ -286,6 +393,14 @@ To list the channels available in a specific server, use the `channels` command 
 
 ```console
 ./DiscordChatExporter.Cli channels -t "mfa.Ifrn" -g 21814
+```
+
+By default, voice channels are included and threads are not. Use `--include-vc false` to exclude
+voice channels, and `--include-threads active` or `--include-threads all` to also list active, or
+all (including archived), threads under each channel.
+
+```console
+./DiscordChatExporter.Cli channels -t "mfa.Ifrn" -g 21814 --include-vc false --include-threads all
 ```
 
 ### List direct message channels

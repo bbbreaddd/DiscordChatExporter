@@ -177,6 +177,40 @@ public class ConvertSpecs
     }
 
     [Fact]
+    public async Task I_can_skip_an_unchanged_JSON_export()
+    {
+        // Arrange
+        using var file = TempFile.Create();
+
+        await new ConvertCommand
+        {
+            InputPaths = [SampleExportFilePath],
+            OutputPath = file.Path,
+            ExportFormat = ExportFormat.PlainText,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        await File.WriteAllTextAsync(file.Path, "already converted");
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [SampleExportFilePath],
+            OutputPath = file.Path,
+            ExportFormat = ExportFormat.PlainText,
+            ShouldSkipUnchanged = true,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        var content = await File.ReadAllTextAsync(file.Path);
+
+        // Assert
+        content.Should().Be("already converted");
+    }
+
+    [Fact]
     public async Task I_can_convert_a_JSON_export_with_a_message_filter()
     {
         // Arrange

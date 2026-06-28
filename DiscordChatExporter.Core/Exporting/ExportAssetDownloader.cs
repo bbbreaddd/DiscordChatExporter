@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
@@ -13,15 +14,41 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
-internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
+// 'offline' makes the downloader purely local: it resolves to an already-cached file when one
+// exists, but never contacts the network. A cache miss returns null instead of downloading, so
+// the caller can keep the original remote URL. This is what the 'convert' command uses, since
+// converting is meant to be an offline operation -- downloading is the job of the export step.
+internal partial class ExportAssetDownloader(
+    string workingDirPath,
+    bool reuse,
+    bool offline = false
+)
 {
     private static readonly AsyncKeyedLocker<string> Locker = new();
 
-    // File paths of the previously downloaded assets
-    private readonly Dictionary<string, string> _previousPathsByUrl = new(StringComparer.Ordinal);
+    // File paths of the previously downloaded assets. Concurrent because a single downloader
+    // instance may be shared across parallel downloads of distinct URLs (e.g. 'checkmedia'
+    // warming a channel's cache); the per-file Locker only guards same-file races.
+    private readonly ConcurrentDictionary<string, string> _previousPathsByUrl = new(
+        StringComparer.Ordinal
+    );
 
-    public async ValueTask<string> DownloadAsync(
+    // In offline mode we always reuse whatever is already on disk; there is no download to avoid
+    // a redundant request for, so reuse is implied regardless of the caller's preference.
+    private bool ShouldReuse => reuse || offline;
+
+    public async ValueTask<string?> DownloadAsync(
         string url,
+        CancellationToken cancellationToken = default
+    ) => await DownloadAsync(url, url, cancellationToken);
+
+    // Downloads from 'downloadUrl' but caches the result under the name derived from 'url'. This
+    // lets a caller fetch from a freshly-refreshed Discord CDN link while keeping the cache keyed
+    // by the original (stored) URL, so that an offline 'convert' -- which only knows the original
+    // URL -- still resolves to the same file.
+    public async ValueTask<string?> DownloadAsync(
+        string url,
+        string downloadUrl,
         CancellationToken cancellationToken = default
     )
     {
@@ -34,12 +61,12 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
             return cachedFilePath;
 
         // Reuse existing files if we're allowed to
-        if (reuse && File.Exists(filePath))
+        if (ShouldReuse && File.Exists(filePath))
             return _previousPathsByUrl[url] = filePath;
 
         // Check for a file cached by the legacy naming scheme (5-char hash) and rename it
         // to the new naming scheme to preserve backwards compatibility with existing exports
-        if (reuse)
+        if (ShouldReuse)
         {
             var legacyFilePath = Path.Combine(workingDirPath, GetLegacyFileNameFromUrl(url));
             if (File.Exists(legacyFilePath))
@@ -59,25 +86,45 @@ internal partial class ExportAssetDownloader(string workingDirPath, bool reuse)
             }
         }
 
+        // Offline mode never reaches the network: an uncached asset stays remote.
+        if (offline)
+            return null;
+
         Directory.CreateDirectory(workingDirPath);
 
-        await Http.ResiliencePipeline.ExecuteAsync(
-            async innerCancellationToken =>
+        try
+        {
+            await Http.ResiliencePipeline.ExecuteAsync(
+                async innerCancellationToken =>
+                {
+                    // Download the file
+                    using var response = await Http.Client.GetAsync(
+                        downloadUrl,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        innerCancellationToken
+                    );
+
+                    response.EnsureSuccessStatusCode();
+
+                    await using var output = File.Create(filePath);
+                    await response.Content.CopyToAsync(output, innerCancellationToken);
+                },
+                cancellationToken
+            );
+        }
+        catch
+        {
+            // A download interrupted mid-stream (cancellation, timeout, network error) leaves a
+            // truncated file behind. Left in place, a later run would see it via File.Exists and
+            // treat the corrupt partial as a complete cache hit, so remove it before bubbling up.
+            try
             {
-                // Download the file
-                using var response = await Http.Client.GetAsync(
-                    url,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    innerCancellationToken
-                );
+                File.Delete(filePath);
+            }
+            catch (IOException) { }
 
-                response.EnsureSuccessStatusCode();
-
-                await using var output = File.Create(filePath);
-                await response.Content.CopyToAsync(output, innerCancellationToken);
-            },
-            cancellationToken
-        );
+            throw;
+        }
 
         return _previousPathsByUrl[url] = filePath;
     }
@@ -126,7 +173,10 @@ internal partial class ExportAssetDownloader
         );
     }
 
-    private static string GetFileNameFromUrl(string url) =>
+    // Internal so that media-verification tooling (e.g. the 'checkmedia' command) can compute the
+    // exact same on-disk file name a real download/reuse would, and check the cache without
+    // contacting the network.
+    internal static string GetFileNameFromUrl(string url) =>
         GetFileNameFromUrl(
             url,
             // 16 chars = 64 bits, reaches 1% collision probability at ~609 million files
@@ -137,7 +187,7 @@ internal partial class ExportAssetDownloader
         );
 
     // Legacy naming used a 5-char hash, kept for backwards compatibility with existing exports
-    private static string GetLegacyFileNameFromUrl(string url) =>
+    internal static string GetLegacyFileNameFromUrl(string url) =>
         GetFileNameFromUrl(
             url,
             SHA256
