@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
@@ -36,6 +37,10 @@ internal class ExportContext(
         request.AssetsDirPath,
         request.ShouldReuseAssets,
         request.IsOfflineAssetMode
+    );
+
+    private readonly ConcurrentDictionary<string, string> _resolvedAssetUrlsByUrl = new(
+        StringComparer.Ordinal
     );
 
     public DiscordClient? Discord { get; } = discord;
@@ -158,6 +163,19 @@ internal class ExportContext(
     }
 
     public async ValueTask<string> ResolveAssetUrlAsync(
+        string url,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (_resolvedAssetUrlsByUrl.TryGetValue(url, out var cachedUrl))
+            return cachedUrl;
+
+        var resolvedUrl = await ResolveAssetUrlCoreAsync(url, cancellationToken);
+        _resolvedAssetUrlsByUrl[url] = resolvedUrl;
+        return resolvedUrl;
+    }
+
+    private async ValueTask<string> ResolveAssetUrlCoreAsync(
         string url,
         CancellationToken cancellationToken = default
     )

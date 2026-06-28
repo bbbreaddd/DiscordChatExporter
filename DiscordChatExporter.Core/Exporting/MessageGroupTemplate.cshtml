@@ -33,6 +33,11 @@
         Context.Request.ShouldFormatMarkdown
             ? Html.Raw(await HtmlMarkdownVisitor.FormatAsync(Context, markdown, false, CancellationToken))
             : Html.Raw(Html.Encode(markdown));
+
+    string IconHref(string iconId) =>
+        Context.Request.ShouldUseHtmlSharedAssets
+            ? $"{Context.Request.GetHtmlSharedAssetUrl(HtmlSharedAssets.IconsFileName)}#{iconId}"
+            : $"#{iconId}";
 }
 
 <div class="chatlog__message-group">
@@ -46,7 +51,7 @@
         ? message.Author.DisplayName
         : authorMember?.DisplayName ?? message.Author.DisplayName;
 
-    <div id="chatlog__message-container-@message.Id" class="chatlog__message-container chatlog__message @(message.IsPinned ? "chatlog__message-container--pinned" : null)" data-message-id="@message.Id">
+    <div id="@HtmlExport.GetMessageElementId(message.Id)" class="chatlog__message-container chatlog__message @(message.IsPinned ? "chatlog__message-container--pinned" : null)" data-message-id="@message.Id">
             @* System notification *@
             @if (message.IsSystemNotification)
             {
@@ -66,7 +71,7 @@
                             };
                         }
 
-                        <use href="#@icon"></use>
+                        <use href="@IconHref(icon)"></use>
                     </svg>
                 </div>
 
@@ -111,10 +116,10 @@
                         {
                             <span>changed the channel icon.</span>
                         }
-                        else if (message.Kind == MessageKind.ChannelPinnedMessage && message.Reference is not null)
+                        else if (message.Kind == MessageKind.ChannelPinnedMessage && message.Reference?.MessageId is not null)
                         {
                             <span>pinned </span>
-                            <a class="chatlog__system-notification-link" href="#chatlog__message-container-@message.Reference.MessageId">a message</a>
+                            <a class="chatlog__system-notification-link" href="@HtmlExport.GetMessageFragment(message.Reference.MessageId.Value)">a message</a>
                             <span> to this channel.</span>
                         }
                         else if (message.Kind == MessageKind.ThreadCreated)
@@ -132,7 +137,7 @@
                     </span>
 
                     @* Timestamp *@
-                    <a class="chatlog__system-notification-timestamp" href="#chatlog__message-container-@message.Id" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
+                    <a class="chatlog__system-notification-timestamp" href="@HtmlExport.GetMessageFragment(message.Id)" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
                 </div>
             }
             // Regular message
@@ -239,7 +244,7 @@
                             }
 
                             @* Timestamp *@
-                            <a class="chatlog__timestamp" href="#chatlog__message-container-@message.Id" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
+                            <a class="chatlog__timestamp" href="@HtmlExport.GetMessageFragment(message.Id)" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
                         </div>
                     }
 
@@ -267,7 +272,7 @@
                         <div class="chatlog__forwarded">
                             <div class="chatlog__forwarded-header">
                                 <svg class="chatlog__forwarded-icon">
-                                    <use href="#forward-icon"></use>
+                                    <use href="@IconHref("forward-icon")"></use>
                                 </svg>
                                 <em>Forwarded</em>
                             </div>
@@ -308,7 +313,7 @@
                                         {
                                             <div class="chatlog__attachment-generic">
                                                 <svg class="chatlog__attachment-generic-icon">
-                                                    <use href="#attachment-icon"/>
+                                                    <use href="@IconHref("attachment-icon")"/>
                                                 </svg>
                                                 <div class="chatlog__attachment-generic-name">
                                                     <a href="@await ResolveAssetUrlAsync(attachment.Url)">
@@ -383,7 +388,7 @@
                             {
                                 <div class="chatlog__attachment-generic">
                                     <svg class="chatlog__attachment-generic-icon">
-                                        <use href="#attachment-icon"/>
+                                        <use href="@IconHref("attachment-icon")"/>
                                     </svg>
                                     <div class="chatlog__attachment-generic-name">
                                         <a href="@await ResolveAssetUrlAsync(attachment.Url)">
@@ -432,7 +437,7 @@
                                             </div>
                                             <div class="chatlog__embed-invite-channel-name">
                                                 <svg class="chatlog__embed-invite-channel-icon">
-                                                    <use href="#channel-icon"></use>
+                                                    <use href="@IconHref("channel-icon")"></use>
                                                 </svg>
                                                 <span> @(invite.Channel?.Name ?? "Unknown Channel")</span>
                                             </div>

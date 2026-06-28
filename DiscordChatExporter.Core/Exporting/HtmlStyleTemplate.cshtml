@@ -1,0 +1,864 @@
+@using System
+@using System.Threading.Tasks
+@using RazorBlade
+
+@inherits RazorBlade.HtmlTemplate
+
+@functions {
+    public required ExportContext Context { get; init; }
+
+    public required string ThemeName { get; init; }
+
+    public bool ResolveFontUrls { get; init; } = true;
+}
+
+@{
+    string Themed(string darkVariant, string lightVariant) =>
+        string.Equals(ThemeName, "Dark", StringComparison.OrdinalIgnoreCase)
+            ? darkVariant
+            : lightVariant;
+
+    string GetFontUrl(string style, int weight) =>
+        $"https://cdn.jsdelivr.net/gh/Tyrrrz/DiscordFonts@master/ggsans-{style}-{weight}.woff2";
+
+    ValueTask<string> ResolveAssetUrlAsync(string url) =>
+        Context.ResolveAssetUrlAsync(url, CancellationToken);
+
+    async ValueTask<string> GetFontSrcAsync(string style, int weight) =>
+        ResolveFontUrls ? await ResolveAssetUrlAsync(GetFontUrl(style, weight)) : GetFontUrl(style, weight);
+}
+
+@Html.Raw("@font-face") {
+    src: url("@await GetFontSrcAsync("normal", 400)");
+    font-family: gg sans;
+    font-weight: 400;
+    font-style: normal;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("normal", 500)");
+    font-family: gg sans;
+    font-weight: 500;
+    font-style: normal;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("normal", 600)");
+    font-family: gg sans;
+    font-weight: 600;
+    font-style: normal;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("normal", 700)");
+    font-family: gg sans;
+    font-weight: 700;
+    font-style: normal;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("normal", 800)");
+    font-family: gg sans;
+    font-weight: 800;
+    font-style: normal;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("italic", 400)");
+    font-family: gg sans;
+    font-weight: 400;
+    font-style: italic;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("italic", 500)");
+    font-family: gg sans;
+    font-weight: 500;
+    font-style: italic;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("italic", 600)");
+    font-family: gg sans;
+    font-weight: 600;
+    font-style: italic;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("italic", 700)");
+    font-family: gg sans;
+    font-weight: 700;
+    font-style: italic;
+}
+
+@@font-face {
+    src: url("@await GetFontSrcAsync("italic", 800)");
+    font-family: gg sans;
+    font-weight: 800;
+    font-style: italic;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    background-color: @Themed("#36393e", "#ffffff");
+    color: @Themed("#dcddde", "#23262a");
+    font-family: "gg sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    font-size: 17px;
+    font-weight: @Themed("400", "500");
+    scroll-behavior: smooth;
+}
+
+.chatlog__pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+    margin: 20px 0;
+    padding: 12px;
+    background-color: @Themed("#2f3136", "#f2f3f5");
+    border-radius: 8px;
+}
+
+.chatlog__pagination-link {
+    color: @Themed("#00aff4", "#0068e0");
+    text-decoration: none;
+    font-weight: 600;
+    padding: 6px 16px;
+    border-radius: 4px;
+    background-color: @Themed("#202225", "#e3e5e8");
+    transition: background-color 0.2s, color 0.2s;
+}
+
+.chatlog__pagination-link:hover {
+    background-color: @Themed("#35383e", "#dbdee1");
+    text-decoration: none;
+}
+
+.chatlog__pagination-link--disabled {
+    color: @Themed("#4f545c", "#949ba4");
+    background-color: @Themed("#202225", "#e3e5e8");
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.chatlog__pagination-current {
+    color: @Themed("#dcddde", "#23262a");
+    font-weight: 500;
+}
+
+a {
+    color: @Themed("#00aff4", "#0068e0");
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+img {
+    object-fit: contain;
+    image-rendering: high-quality;
+    image-rendering: -webkit-optimize-contrast;
+}
+
+.preamble {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    max-width: 100%;
+    padding: 1rem;
+}
+
+.preamble__guild-icon-container {
+    grid-column: 1;
+}
+
+.preamble__guild-icon {
+    max-width: 88px;
+    max-height: 88px;
+}
+
+.preamble__entries-container {
+    grid-column: 2;
+    margin-left: 1rem;
+}
+
+.preamble__entry {
+    margin-bottom: 0.15rem;
+    color: @Themed("#ffffff", "#2f3136");
+    font-size: 1.4rem;
+}
+
+.preamble__entry--small {
+    font-size: 1rem;
+}
+
+.chatlog {
+    padding: 1rem 0;
+    width: 100%;
+    border-top: 1px solid @Themed("rgba(255, 255, 255, 0.1)", "#eceeef");
+    border-bottom: 1px solid @Themed("rgba(255, 255, 255, 0.1)", "#eceeef");
+}
+
+.chatlog__message-group {
+    margin-bottom: 1rem;
+}
+
+.chatlog__message-container {
+    background-color: transparent;
+    transition: background-color 1s ease;
+}
+
+.chatlog__message-container--highlighted {
+    background-color: @Themed("rgba(114, 137, 218, 0.2)", "rgba(114, 137, 218, 0.2)");
+}
+
+.chatlog__message-container--pinned {
+    background-color: @Themed("rgba(249, 168, 37, 0.05)", "rgba(249, 168, 37, 0.05)");
+}
+
+.chatlog__message {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    padding: 0.15rem 0;
+    direction: ltr;
+    unicode-bidi: bidi-override;
+}
+
+.chatlog__message:hover {
+    background-color: @Themed("#32353b", "#fafafa");
+}
+
+.chatlog__message:hover .chatlog__short-timestamp {
+    display: block;
+}
+
+.chatlog__message-aside {
+    grid-column: 1;
+    width: 72px;
+    padding: 0.15rem 0.15rem 0 0.15rem;
+    text-align: center;
+}
+
+.chatlog__reply-symbol {
+    height: 10px;
+    margin: 6px 4px 4px 36px;
+    border-left: 2px solid @Themed("#4f545c", "#c7ccd1");
+    border-top: 2px solid @Themed("#4f545c", "#c7ccd1");
+    border-top-left-radius: 6px;
+}
+
+.chatlog__avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+}
+
+.chatlog__short-timestamp {
+    display: none;
+    overflow: hidden;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+    line-height: 1.375rem;
+    white-space: nowrap;
+}
+
+.chatlog__message-primary {
+    grid-column: 2;
+    min-width: 0;
+    padding: 0 0.15rem;
+}
+
+.chatlog__reply {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    align-items: center;
+    margin-right: 0.4rem;
+    margin-bottom: 0.15rem;
+    min-height: 0.875rem;
+    user-select: none;
+}
+
+.chatlog__reply-avatar {
+    grid-column: 1;
+    margin-top: 1px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+}
+
+.chatlog__reply-author {
+    grid-column: 2;
+    margin-left: 0.25rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.chatlog__reply-content {
+    grid-column: 3;
+    margin-left: 0.35rem;
+    overflow: hidden;
+    font-size: 0.875rem;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.chatlog__reply-content,
+.chatlog__reply-link {
+    color: @Themed("rgba(255, 255, 255, 0.64)", "rgba(79, 84, 92, 0.64)");
+}
+
+.chatlog__reply-link:hover {
+    color: @Themed("rgba(255, 255, 255, 0.96)", "rgba(79, 84, 92, 0.96)");
+    text-decoration: none;
+}
+
+.chatlog__reply-link:hover *:not(.chatlog__markdown-spoiler) {
+    color: inherit;
+}
+
+.chatlog__reply-link img,
+.chatlog__reply-link video,
+.chatlog__reply-link .chatlog__emoji,
+.chatlog__reply-link .chatlog__sticker {
+    display: none;
+}
+
+.chatlog__reply-link .chatlog__markdown-quote {
+    margin: 0;
+}
+
+.chatlog__reply-link .chatlog__markdown-pre {
+    max-width: unset;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.chatlog__reply-edited-timestamp {
+    margin-left: 0.25rem;
+    color: @Themed("rgba(255, 255, 255, 0.48)", "rgba(79, 84, 92, 0.48)");
+}
+
+.chatlog__reply-unknown {
+    grid-column: 1 / span 3;
+    color: @Themed("rgba(255, 255, 255, 0.48)", "rgba(79, 84, 92, 0.48)");
+    font-size: 0.875rem;
+    font-style: italic;
+}
+
+.chatlog__header {
+    margin-bottom: 0.15rem;
+    white-space: pre-wrap;
+}
+
+.chatlog__author {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.chatlog__author-tag {
+    margin-left: 0.25rem;
+    padding: 0.1rem 0.3rem;
+    border-radius: 0.1875rem;
+    background-color: @Themed("#5865f2", "#5865f2");
+    color: #fff;
+    font-size: 0.625rem;
+    font-weight: 500;
+    vertical-align: top;
+}
+
+.chatlog__timestamp {
+    margin-left: 0.25rem;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+}
+
+.chatlog__content {
+    white-space: break-spaces;
+    word-wrap: break-word;
+}
+
+.chatlog__edited-timestamp {
+    margin-left: 0.25rem;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.625rem;
+}
+
+.chatlog__system-notification-icon {
+    width: 18px;
+    height: 18px;
+    margin-top: 4px;
+}
+
+.chatlog__system-notification-author {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.chatlog__system-notification-content {
+    color: @Themed("#b9bbbe", "#747f8d");
+    font-size: 0.875rem;
+}
+
+.chatlog__system-notification-timestamp {
+    margin-left: 0.25rem;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+}
+
+.chatlog__forwarded {
+    margin-top: 0.35rem;
+    max-width: 520px;
+    padding: 0.75rem;
+    border: 1px solid @Themed("rgba(79, 84, 92, 0.48)", "rgba(79, 84, 92, 0.16)");
+    border-radius: 0.5rem;
+}
+
+.chatlog__forwarded-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    color: @Themed("#b9bbbe", "#747f8d");
+    font-size: 0.875rem;
+}
+
+.chatlog__forwarded-icon {
+    width: 1rem;
+    height: 1rem;
+    margin-right: 0.25rem;
+}
+
+.chatlog__forwarded-content,
+.chatlog__forwarded-attachments {
+    margin-top: 0.5rem;
+}
+
+.chatlog__forwarded-attachment {
+    max-width: 400px;
+    max-height: 300px;
+    border-radius: 0.25rem;
+}
+
+.chatlog__forwarded-timestamp {
+    margin-top: 0.5rem;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+}
+
+.chatlog__attachment {
+    position: relative;
+    margin-top: 0.5rem;
+    max-width: 520px;
+}
+
+.chatlog__attachment--hidden {
+    cursor: pointer;
+}
+
+.chatlog__attachment-spoiler-caption {
+    position: absolute;
+    z-index: 1;
+    inset: 50% auto auto 50%;
+    transform: translate(-50%, -50%);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+    background-color: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+.chatlog__attachment--hidden .chatlog__attachment-media,
+.chatlog__attachment--hidden .chatlog__attachment-generic {
+    filter: blur(44px);
+}
+
+.chatlog__attachment-media {
+    max-width: 100%;
+    max-height: 350px;
+    border-radius: 0.25rem;
+}
+
+.chatlog__attachment-generic {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid @Themed("rgba(79, 84, 92, 0.48)", "rgba(79, 84, 92, 0.16)");
+    border-radius: 0.5rem;
+    box-sizing: border-box;
+}
+
+.chatlog__attachment-generic-icon {
+    width: 32px;
+    height: 40px;
+    margin-right: 0.75rem;
+}
+
+.chatlog__attachment-generic-name {
+    flex: 1;
+}
+
+.chatlog__attachment-generic-size {
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+}
+
+.chatlog__embed {
+    display: flex;
+    margin-top: 0.5rem;
+    max-width: 520px;
+    border-radius: 0.25rem;
+    background-color: @Themed("rgba(47, 49, 54, 0.3)", "rgba(249, 249, 249, 1)");
+    overflow: hidden;
+}
+
+.chatlog__embed-color-pill {
+    flex-shrink: 0;
+    width: 0.25rem;
+}
+
+.chatlog__embed-color-pill--default {
+    background-color: @Themed("#202225", "#dcddde");
+}
+
+.chatlog__embed-content-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+}
+
+.chatlog__embed-content {
+    display: flex;
+    padding: 0.75rem 0.875rem;
+}
+
+.chatlog__embed-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.chatlog__embed-author-container {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.chatlog__embed-author-icon {
+    width: 24px;
+    height: 24px;
+    margin-right: 0.5rem;
+    border-radius: 50%;
+}
+
+.chatlog__embed-author,
+.chatlog__embed-author-link {
+    color: @Themed("#ffffff", "#2f3136");
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.chatlog__embed-title {
+    margin-bottom: 0.5rem;
+    color: @Themed("#ffffff", "#2f3136");
+    font-size: 0.875rem;
+    font-weight: 600;
+}
+
+.chatlog__embed-description,
+.chatlog__embed-field-value {
+    color: @Themed("#dcddde", "#2f3136");
+    font-size: 0.875rem;
+}
+
+.chatlog__embed-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+}
+
+.chatlog__embed-field {
+    min-width: 0;
+}
+
+.chatlog__embed-field--inline {
+    grid-column: span 1;
+}
+
+.chatlog__embed-field-name {
+    margin-bottom: 0.15rem;
+    color: @Themed("#ffffff", "#2f3136");
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.chatlog__embed-thumbnail-container {
+    flex-shrink: 0;
+    margin-left: 1rem;
+}
+
+.chatlog__embed-thumbnail {
+    width: 80px;
+    max-height: 80px;
+    border-radius: 0.25rem;
+}
+
+.chatlog__embed-images {
+    display: grid;
+    gap: 0.25rem;
+    padding: 0 0.875rem 0.875rem 0.875rem;
+}
+
+.chatlog__embed-images--single {
+    grid-template-columns: 1fr;
+}
+
+.chatlog__embed-image-container {
+    overflow: hidden;
+}
+
+.chatlog__embed-image {
+    max-width: 100%;
+    max-height: 350px;
+    border-radius: 0.25rem;
+}
+
+.chatlog__embed-footer {
+    display: flex;
+    align-items: center;
+    padding: 0 0.875rem 0.875rem 0.875rem;
+    color: @Themed("#72767d", "#747f8d");
+    font-size: 0.75rem;
+}
+
+.chatlog__embed-footer-icon {
+    width: 20px;
+    height: 20px;
+    margin-right: 0.5rem;
+    border-radius: 50%;
+}
+
+.chatlog__embed-spotify-container,
+.chatlog__embed-youtube-container,
+.chatlog__embed-invite-container {
+    width: 100%;
+}
+
+.chatlog__embed-spotify {
+    border: 0;
+}
+
+.chatlog__embed-youtube-thumbnail,
+.chatlog__embed-generic-image,
+.chatlog__embed-generic-video,
+.chatlog__embed-generic-gifv {
+    max-width: 100%;
+    max-height: 350px;
+}
+
+.chatlog__embed-invite {
+    display: flex;
+    align-items: center;
+    padding: 0.75rem;
+}
+
+.chatlog__embed-invite-title {
+    padding: 0.75rem 0.75rem 0;
+    color: @Themed("#ffffff", "#2f3136");
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.chatlog__embed-invite-guild-icon {
+    width: 48px;
+    height: 48px;
+    margin-right: 0.75rem;
+    border-radius: 50%;
+}
+
+.chatlog__embed-invite-guild-name {
+    color: @Themed("#ffffff", "#2f3136");
+    font-weight: 600;
+}
+
+.chatlog__embed-invite-channel-name {
+    display: flex;
+    align-items: center;
+    color: @Themed("#dcddde", "#2f3136");
+    font-size: 0.875rem;
+}
+
+.chatlog__embed-invite-channel-icon {
+    width: 1rem;
+    height: 1rem;
+}
+
+.chatlog__sticker {
+    display: inline-block;
+    margin-top: 0.5rem;
+}
+
+.chatlog__sticker--media {
+    width: 160px;
+    height: 160px;
+}
+
+.chatlog__reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+}
+
+.chatlog__reaction {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.5rem;
+    background-color: @Themed("rgba(79, 84, 92, 0.32)", "rgba(79, 84, 92, 0.08)");
+}
+
+.chatlog__reaction-count {
+    margin-left: 0.25rem;
+    color: @Themed("#dcddde", "#2f3136");
+    font-size: 0.875rem;
+}
+
+.chatlog__emoji {
+    width: 1.375rem;
+    height: 1.375rem;
+    vertical-align: bottom;
+}
+
+.chatlog__emoji--small {
+    width: 1rem;
+    height: 1rem;
+}
+
+.chatlog__emoji--large {
+    width: 3rem;
+    height: 3rem;
+}
+
+.chatlog__markdown {
+    line-height: 1.375rem;
+}
+
+.chatlog__markdown h1 {
+    margin: 0.8rem 0 0.2rem;
+    font-size: 1.5rem;
+}
+
+.chatlog__markdown h2 {
+    margin: 0.8rem 0 0.2rem;
+    font-size: 1.3rem;
+}
+
+.chatlog__markdown h3 {
+    margin: 0.8rem 0 0.2rem;
+    font-size: 1.1rem;
+}
+
+.chatlog__markdown h1:first-child, h2:first-child, h3:first-child {
+    margin-top: 0.2rem;
+}
+
+.chatlog__markdown ul, ol {
+    margin: 0.1rem 0;
+    padding-left: 1.2rem;
+}
+
+.chatlog__markdown-preserve {
+    white-space: break-spaces;
+}
+
+.chatlog__markdown-spoiler {
+    border-radius: 0.1875rem;
+    background-color: @Themed("rgba(255, 255, 255, 0.1)", "rgba(79, 84, 92, 0.16)");
+}
+
+.chatlog__markdown-spoiler--hidden {
+    color: transparent;
+}
+
+.chatlog__markdown-spoiler--hidden:hover {
+    background-color: @Themed("rgba(255, 255, 255, 0.2)", "rgba(79, 84, 92, 0.24)");
+}
+
+.chatlog__markdown-spoiler--hidden::selection {
+    color: transparent;
+}
+
+.chatlog__markdown-quote {
+    display: flex;
+    margin: 0.1rem 0;
+}
+
+.chatlog__markdown-quote-border {
+    margin-right: 0.5rem;
+    border-left: 4px solid @Themed("#4f545c", "#c7ccd1");
+    border-radius: 3px;
+}
+
+.chatlog__markdown-pre {
+    max-width: 100%;
+    box-sizing: border-box;
+    font-family: Consolas, Menlo, Monaco, monospace;
+}
+
+.chatlog__markdown-pre--multiline {
+    display: block;
+    margin-top: 0.25rem;
+    padding: 0.5rem;
+    border: 2px solid @Themed("#282b30", "#f3f4f5");
+    border-radius: 0.25rem;
+    background-color: @Themed("#2f3136", "#f3f4f5");
+    color: @Themed("#b9bbbe", "#383a42");
+    white-space: pre-wrap;
+}
+
+.chatlog__markdown-pre--multiline.hljs {
+    background-color: @Themed("#2f3136", "#f3f4f5");
+}
+
+.chatlog__markdown-pre--inline {
+    padding: 0.2rem;
+    border-radius: 0.25rem;
+    background-color: @Themed("#2f3136", "#f3f4f5");
+    color: @Themed("#b9bbbe", "#383a42");
+    font-size: 0.875rem;
+}
+
+.chatlog__markdown-mention {
+    border-radius: 0.1875rem;
+    padding: 0 2px;
+    background-color: @Themed("rgba(88, 101, 242, 0.3)", "rgba(88, 101, 242, 0.15)");
+    color: @Themed("#dee0fc", "#505cdc");
+    font-weight: 500;
+}
+
+.chatlog__markdown-mention:hover {
+    background-color: @Themed("#5865f2", "#5865f2");
+    color: #fff;
+    text-decoration: none;
+}
+
+.chatlog__markdown-timestamp {
+    border-radius: 0.1875rem;
+    padding: 0 2px;
+    background-color: @Themed("rgba(79, 84, 92, 0.48)", "rgba(79, 84, 92, 0.12)");
+    color: inherit;
+}
+
+.postamble {
+    padding: 1.25rem;
+}
+
+.postamble__entry {
+    color: @Themed("#ffffff", "#2f3136");
+}

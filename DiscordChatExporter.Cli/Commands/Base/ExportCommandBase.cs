@@ -148,6 +148,12 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool IsUtcNormalizationEnabled { get; set; } = false;
 
     [CommandOption(
+        "html-shared-assets",
+        Description = "Write shared CSS/JS/icon files into a local _dce directory and have HTML output reference them instead of inlining them into every page. Only valid for HTML formats."
+    )]
+    public bool ShouldUseHtmlSharedAssets { get; set; } = false;
+
+    [CommandOption(
         "incremental",
         Description = "Append new messages to an existing JSON export file instead of overwriting it."
     )]
@@ -201,6 +207,16 @@ public abstract class ExportCommandBase : DiscordCommandBase
             throw new CommandException(
                 "Option --incremental can only be used with JSON format. "
                     + "Use the convert command to get other formats."
+            );
+        }
+
+        if (
+            ShouldUseHtmlSharedAssets
+            && ExportFormat is not ExportFormat.HtmlDark and not ExportFormat.HtmlLight
+        )
+        {
+            throw new CommandException(
+                "Option --html-shared-assets can only be used with HTML formats."
             );
         }
 
@@ -334,7 +350,8 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                         Locale,
                                         IsUtcNormalizationEnabled,
                                         IsIncremental,
-                                        ShouldCacheAssetsOnly
+                                        ShouldCacheAssetsOnly,
+                                        shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets
                                     );
 
                                     await Exporter.ExportChannelAsync(

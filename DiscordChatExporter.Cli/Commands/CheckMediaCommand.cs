@@ -201,7 +201,8 @@ public partial class CheckMediaCommand : DiscordCommandBase
                     false,
                     false,
                     null,
-                    false
+                    false,
+                    shouldUseHtmlSharedAssets: false
                 );
 
                 var result = await MediaInspector.InspectAsync(

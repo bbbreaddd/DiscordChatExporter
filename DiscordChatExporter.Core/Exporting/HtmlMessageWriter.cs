@@ -17,6 +17,10 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
     private readonly HtmlMinifier _minifier = new();
     private readonly List<Message> _messageGroup = [];
 
+    public HtmlPageFeatures PageFeatures { get; private set; }
+
+    public string ThemeName { get; } = themeName;
+
     // Note: in reverse order, last message appears earlier than the first message
     private bool CanJoinGroup(Message message)
     {
@@ -74,7 +78,7 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
     {
         await _writer.WriteLineAsync(
             Minify(
-                await new PreambleTemplate { Context = Context, ThemeName = themeName }.RenderAsync(
+                await new PreambleTemplate { Context = Context, ThemeName = ThemeName }.RenderAsync(
                     cancellationToken
                 )
             )
@@ -102,6 +106,7 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
         CancellationToken cancellationToken = default
     )
     {
+        PageFeatures |= GetPageFeatures(message);
         await base.WriteMessageAsync(message, cancellationToken);
 
         // If the message can be grouped, buffer it for now
@@ -118,6 +123,45 @@ internal class HtmlMessageWriter(Stream stream, ExportContext context, string th
             _messageGroup.Add(message);
         }
     }
+
+    private HtmlPageFeatures GetPageFeatures(Message message)
+    {
+        var features = HtmlPageFeatures.None;
+
+        if (Context.Request.ShouldFormatMarkdown)
+        {
+            features |= GetMarkdownFeatures(message.Content);
+            features |= GetMarkdownFeatures(message.ForwardedMessage?.Content);
+            features |= GetMarkdownFeatures(message.ReferencedMessage?.Content);
+
+            foreach (var embed in message.Embeds)
+            {
+                features |= GetMarkdownFeatures(embed.Title);
+                features |= GetMarkdownFeatures(embed.Description);
+
+                foreach (var field in embed.Fields)
+                {
+                    features |= GetMarkdownFeatures(field.Name);
+                    features |= GetMarkdownFeatures(field.Value);
+                }
+            }
+        }
+
+        if (
+            message.Stickers.Any(s => s.Format == StickerFormat.Lottie)
+            || message.ForwardedMessage?.Stickers.Any(s => s.Format == StickerFormat.Lottie) == true
+        )
+        {
+            features |= HtmlPageFeatures.LottieStickers;
+        }
+
+        return features;
+    }
+
+    private static HtmlPageFeatures GetMarkdownFeatures(string? markdown) =>
+        !string.IsNullOrWhiteSpace(markdown) && markdown.Contains("```", StringComparison.Ordinal)
+            ? HtmlPageFeatures.HighlightCode
+            : HtmlPageFeatures.None;
 
     public override async ValueTask WritePostambleAsync(
         CancellationToken cancellationToken = default

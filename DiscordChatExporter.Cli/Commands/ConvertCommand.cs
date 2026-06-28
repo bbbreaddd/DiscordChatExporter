@@ -123,6 +123,12 @@ public partial class ConvertCommand : ICommand
     [CommandOption("utc", Description = "Normalize all timestamps to UTC+0.")]
     public bool IsUtcNormalizationEnabled { get; set; }
 
+    [CommandOption(
+        "html-shared-assets",
+        Description = "Write shared CSS/JS/icon files into a local _dce directory and have HTML output reference them instead of inlining them into every page. Only valid for HTML formats."
+    )]
+    public bool ShouldUseHtmlSharedAssets { get; set; }
+
     public async ValueTask ExecuteAsync(IConsole console)
     {
         var cancellationToken = console.RegisterCancellationHandler();
@@ -132,6 +138,16 @@ public partial class ConvertCommand : ICommand
             throw new CommandException(
                 "Cannot convert to JSON, because the input is already a JSON export. "
                     + "Choose a different output format."
+            );
+        }
+
+        if (
+            ShouldUseHtmlSharedAssets
+            && ExportFormat is not ExportFormat.HtmlDark and not ExportFormat.HtmlLight
+        )
+        {
+            throw new CommandException(
+                "Option --html-shared-assets can only be used with HTML formats."
             );
         }
 
@@ -263,7 +279,8 @@ public partial class ConvertCommand : ICommand
                 Locale,
                 IsUtcNormalizationEnabled,
                 // Convert is an offline operation: reference cached assets, but never contact Discord.
-                isOfflineAssetMode: true
+                isOfflineAssetMode: true,
+                shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets
             );
 
         bool TryGetKnownOutputFilePath(string inputFilePath, out string outputFilePath)

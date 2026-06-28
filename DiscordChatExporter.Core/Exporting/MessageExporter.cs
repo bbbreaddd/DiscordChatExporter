@@ -13,6 +13,8 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
     private MessageWriter? _writer;
     private string? _activeFilePath;
     private string? _activeTempFilePath;
+    private readonly System.Collections.Generic.List<HtmlPageFeatures> _htmlPageFeaturesByPartition =
+    [];
 
     public long MessagesExported { get; private set; }
 
@@ -60,6 +62,9 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
 
             try
             {
+                if (_writer is HtmlMessageWriter htmlWriter)
+                    _htmlPageFeaturesByPartition.Add(htmlWriter.PageFeatures);
+
                 await _writer.WritePostambleAsync(cancellationToken);
             }
             // Writer must be disposed, even if it fails to write the postamble
@@ -108,6 +113,11 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
         )
             return;
 
+        if (context.Request.ShouldUseHtmlSharedAssets)
+        {
+            await HtmlSharedAssets.WriteAsync(context, GetThemeName(context.Request.Format));
+        }
+
         var basePathToUse = outputFilePathOverride ?? context.Request.OutputFilePath;
 
         if (_partitionIndex <= 0)
@@ -116,7 +126,15 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
             var path = GetPartitionFilePath(basePathToUse, 0);
             if (File.Exists(path))
             {
-                await ReplacePlaceholdersAsync(path, "", "");
+                var pageFeatures =
+                    _htmlPageFeaturesByPartition.Count > 0
+                        ? _htmlPageFeaturesByPartition[0]
+                        : HtmlPageFeatures.None;
+
+                await ReplacePlaceholdersAsync(
+                    path,
+                    await BuildHtmlReplacementsAsync(pageFeatures, "", "")
+                );
             }
             return;
         }
@@ -151,14 +169,56 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
 </div>
 ";
 
-            await ReplacePlaceholdersAsync(path, paginationHtml, paginationHtml);
+            var pageFeatures =
+                j < _htmlPageFeaturesByPartition.Count
+                    ? _htmlPageFeaturesByPartition[j]
+                    : HtmlPageFeatures.None;
+
+            await ReplacePlaceholdersAsync(
+                path,
+                await BuildHtmlReplacementsAsync(pageFeatures, paginationHtml, paginationHtml)
+            );
         }
+    }
+
+    private static string GetThemeName(ExportFormat format) =>
+        format == ExportFormat.HtmlLight ? "Light" : "Dark";
+
+    private async ValueTask<string> ResolveHtmlHeadAssetUrlAsync(string url) =>
+        await context.ResolveAssetUrlAsync(url);
+
+    private async ValueTask<System.Collections.Generic.Dictionary<
+        string,
+        string
+    >> BuildHtmlReplacementsAsync(
+        HtmlPageFeatures pageFeatures,
+        string headerHtml,
+        string footerHtml
+    )
+    {
+        var replacements = new System.Collections.Generic.Dictionary<string, string>(
+            System.StringComparer.Ordinal
+        )
+        {
+            ["<!--dce-pagination-header-->"] = headerHtml,
+            ["<!--dce-pagination-footer-->"] = footerHtml,
+            ["<!--dce-highlight-style-->"] = pageFeatures.HasFlag(HtmlPageFeatures.HighlightCode)
+                ? $"""<link rel="stylesheet" href="{await ResolveHtmlHeadAssetUrlAsync($"https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/styles/solarized-{GetThemeName(context.Request.Format).ToLowerInvariant()}.min.css")}">"""
+                : "",
+            ["<!--dce-highlight-script-->"] = pageFeatures.HasFlag(HtmlPageFeatures.HighlightCode)
+                ? $"""<script src="{await ResolveHtmlHeadAssetUrlAsync("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.15.6/highlight.min.js")}"></script>"""
+                : "",
+            ["<!--dce-lottie-script-->"] = pageFeatures.HasFlag(HtmlPageFeatures.LottieStickers)
+                ? $"""<script src="{await ResolveHtmlHeadAssetUrlAsync("https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.8.1/lottie.min.js")}"></script>"""
+                : "",
+        };
+
+        return replacements;
     }
 
     private static async ValueTask ReplacePlaceholdersAsync(
         string filePath,
-        string headerHtml,
-        string footerHtml
+        System.Collections.Generic.IReadOnlyDictionary<string, string> replacements
     )
     {
         var tempPath = filePath + ".post.tmp";
@@ -170,15 +230,9 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
                 string? line;
                 while ((line = await reader.ReadLineAsync()) is not null)
                 {
-                    if (line.Contains("<!--dce-pagination-header-->", StringComparison.Ordinal))
+                    if (replacements.TryGetValue(line.Trim(), out var replacement))
                     {
-                        await writer.WriteLineAsync(headerHtml);
-                    }
-                    else if (
-                        line.Contains("<!--dce-pagination-footer-->", StringComparison.Ordinal)
-                    )
-                    {
-                        await writer.WriteLineAsync(footerHtml);
+                        await writer.WriteLineAsync(replacement);
                     }
                     else
                     {

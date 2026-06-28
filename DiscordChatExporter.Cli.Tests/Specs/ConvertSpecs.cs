@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using CliFx;
 using CliFx.Infrastructure;
@@ -119,6 +120,8 @@ public class ConvertSpecs
         content.Should().Contain("👍");
         content.Should().Contain("changed the channel name: ");
         content.Should().Contain("off-topic");
+        content.Should().NotContain("highlight.min.js");
+        content.Should().NotContain("lottie.min.js");
     }
 
     [Fact]
@@ -358,6 +361,40 @@ public class ConvertSpecs
     }
 
     [Fact]
+    public async Task I_can_convert_a_JSON_export_to_html_with_shared_assets()
+    {
+        // Arrange
+        using var dir = TempDirectory.Create();
+        var filePath = Path.Combine(dir.Path, "output.html");
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [SampleExportFilePath],
+            OutputPath = filePath,
+            ExportFormat = ExportFormat.HtmlDark,
+            PartitionLimit = PartitionLimit.Parse("1"),
+            ShouldUseHtmlSharedAssets = true,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        // Assert
+        File.Exists(Path.Combine(dir.Path, "_dce", "html-dark.css")).Should().BeTrue();
+        File.Exists(Path.Combine(dir.Path, "_dce", "html.js")).Should().BeTrue();
+        File.Exists(Path.Combine(dir.Path, "_dce", "icons.svg")).Should().BeTrue();
+
+        var html = await File.ReadAllTextAsync(filePath);
+        var allHtml = string.Join(
+            "\n",
+            Directory.EnumerateFiles(dir.Path, "*.html").Select(File.ReadAllText)
+        );
+        html.Should().Contain("_dce/html-dark.css");
+        html.Should().Contain("_dce/html.js");
+        allHtml.Should().Contain("_dce/icons.svg#");
+    }
+
+    [Fact]
     public async Task I_can_convert_a_partitioned_JSON_export_and_merge_them_correctly()
     {
         // Arrange
@@ -396,5 +433,20 @@ public class ConvertSpecs
 
         html2.Should().Contain("class=\"chatlog__pagination\"");
         html2.Should().Contain("Page 2 of 2");
+    }
+
+    [Fact]
+    public async Task I_cannot_use_html_shared_assets_with_a_non_html_format()
+    {
+        var act = async () =>
+            await new ConvertCommand
+            {
+                InputPaths = [SampleExportFilePath],
+                OutputPath = TempFile.Create().Path,
+                ExportFormat = ExportFormat.PlainText,
+                ShouldUseHtmlSharedAssets = true,
+            }.ExecuteAsync(new FakeConsole());
+
+        await act.Should().ThrowAsync<CommandException>();
     }
 }

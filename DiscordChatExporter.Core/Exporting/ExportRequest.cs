@@ -7,6 +7,7 @@ using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exporting.Filtering;
 using DiscordChatExporter.Core.Exporting.Partitioning;
+using DiscordChatExporter.Core.Utils;
 using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
@@ -64,6 +65,8 @@ public partial class ExportRequest
 
     public bool IsIncremental { get; }
 
+    public bool ShouldUseHtmlSharedAssets { get; }
+
     public ExportRequest(
         Guild guild,
         Channel channel,
@@ -82,7 +85,8 @@ public partial class ExportRequest
         bool isUtcNormalizationEnabled,
         bool isIncremental = false,
         bool shouldCacheAssetsOnly = false,
-        bool isOfflineAssetMode = false
+        bool isOfflineAssetMode = false,
+        bool shouldUseHtmlSharedAssets = false
     )
     {
         Guild = guild;
@@ -101,6 +105,7 @@ public partial class ExportRequest
         Locale = locale;
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
         IsIncremental = isIncremental;
+        ShouldUseHtmlSharedAssets = shouldUseHtmlSharedAssets;
 
         BaseOutputDirPath =
             Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)
@@ -131,6 +136,10 @@ public partial class ExportRequest
         OutputFilePath = existingOutputFilePath;
         OutputDirPath = Path.GetDirectoryName(OutputFilePath)!;
     }
+
+    public string GetHtmlSharedAssetsDirPath() => HtmlExport.GetSharedAssetsDirPath(OutputDirPath);
+
+    public string GetHtmlSharedAssetUrl(string fileName) => HtmlExport.GetSharedAssetUrl(fileName);
 }
 
 public partial class ExportRequest
