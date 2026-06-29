@@ -45,7 +45,10 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         CancellationToken cancellationToken = default
     )
     {
-        _writer.WriteString(propertyName, await Context.ResolveAssetUrlAsync(url, cancellationToken));
+        _writer.WriteString(
+            propertyName,
+            await Context.ResolveAssetUrlAsync(url, cancellationToken)
+        );
 
         if (!string.IsNullOrWhiteSpace(localPathPropertyName))
         {
@@ -143,12 +146,7 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteStartObject();
 
         _writer.WriteString("id", attachment.Id.ToString());
-        await WriteAssetUrlAsync(
-            "url",
-            attachment.Url,
-            "localPath",
-            cancellationToken
-        );
+        await WriteAssetUrlAsync("url", attachment.Url, "localPath", cancellationToken);
 
         _writer.WriteString("fileName", attachment.FileName);
         _writer.WriteNumber("fileSizeBytes", attachment.FileSize.TotalBytes);

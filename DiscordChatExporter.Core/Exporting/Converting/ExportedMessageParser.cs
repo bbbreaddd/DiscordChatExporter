@@ -182,18 +182,14 @@ internal static class ExportedMessageParser
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(ColorTranslator.FromHtml);
 
-        var author = json.GetPropertyOrNull("author")?.Pipe(j =>
-            ParseEmbedAuthor(j, rebaseLocalAssetPath)
-        );
-        var thumbnail = json.GetPropertyOrNull("thumbnail")?.Pipe(j =>
-            ParseEmbedImage(j, rebaseLocalAssetPath)
-        );
-        var video = json.GetPropertyOrNull("video")?.Pipe(j =>
-            ParseEmbedVideo(j, rebaseLocalAssetPath)
-        );
-        var footer = json.GetPropertyOrNull("footer")?.Pipe(j =>
-            ParseEmbedFooter(j, rebaseLocalAssetPath)
-        );
+        var author = json.GetPropertyOrNull("author")
+            ?.Pipe(j => ParseEmbedAuthor(j, rebaseLocalAssetPath));
+        var thumbnail = json.GetPropertyOrNull("thumbnail")
+            ?.Pipe(j => ParseEmbedImage(j, rebaseLocalAssetPath));
+        var video = json.GetPropertyOrNull("video")
+            ?.Pipe(j => ParseEmbedVideo(j, rebaseLocalAssetPath));
+        var footer = json.GetPropertyOrNull("footer")
+            ?.Pipe(j => ParseEmbedFooter(j, rebaseLocalAssetPath));
 
         var images =
             json.GetPropertyOrNull("images")
@@ -411,9 +407,8 @@ internal static class ExportedMessageParser
         var forwardedMessage = json.GetPropertyOrNull("forwardedMessage")
             ?.Pipe(j => ParseMessageSnapshot(j, rebaseLocalAssetPath));
 
-        var interaction = json.GetPropertyOrNull("interaction")?.Pipe(j =>
-            ParseInteraction(j, rebaseLocalAssetPath)
-        );
+        var interaction = json.GetPropertyOrNull("interaction")
+            ?.Pipe(j => ParseInteraction(j, rebaseLocalAssetPath));
 
         return new Message(
             id,
