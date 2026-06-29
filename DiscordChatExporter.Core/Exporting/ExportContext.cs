@@ -273,9 +273,9 @@ internal class ExportContext(
         ["chatlog__avatar"] = "av",
         ["chatlog__short-timestamp"] = "st",
         ["chatlog__reply"] = "re",
-        ["chatlog__reply-avatar"] = "ra",
+        ["chatlog__reply-avatar"] = "rav",
         ["chatlog__reply-author"] = "ru",
-        ["chatlog__reply-content"] = "rc",
+        ["chatlog__reply-content"] = "rpc",
         ["chatlog__reply-link"] = "rl",
         ["chatlog__reply-edited-timestamp"] = "rt",
         ["chatlog__reply-unknown"] = "rn",
@@ -361,7 +361,7 @@ internal class ExportContext(
         ["chatlog__embed-thumbnail-container"] = "etc",
         ["chatlog__embed-thumbnail"] = "eth",
         ["chatlog__embed-footer"] = "efr",
-        ["chatlog__embed-footer-icon"] = "efi",
+        ["chatlog__embed-footer-icon"] = "effi",
         ["chatlog__embed-footer-text"] = "eft",
         ["chatlog__reactions"] = "ra",
         ["chatlog__reaction"] = "rc",
@@ -487,5 +487,34 @@ internal class ExportContext(
         css = System.Text.RegularExpressions.Regex.Replace(css, @"\s+", " ");
 
         return css.Trim();
+    }
+
+    public string EscapeCssString(string value)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var c in value)
+        {
+            if (
+                c == '\''
+                || c == '\\'
+                || c == '('
+                || c == ')'
+                || c == '<'
+                || c == '>'
+                || char.IsControl(c)
+            )
+            {
+                sb.Append('\\');
+                sb.Append(
+                    ((int)c).ToString("x", System.Globalization.CultureInfo.InvariantCulture)
+                );
+                sb.Append(' ');
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
     }
 }

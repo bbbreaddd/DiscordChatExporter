@@ -27,7 +27,7 @@
     var repeatAvatars = Context.GetAvatarClasses().Where(kvp => kvp.Value.Count >= 2).ToList();
     if (repeatAvatars.Any())
     {
-        <style>@string.Join("", repeatAvatars.Select(kvp => $".{kvp.Value.ClassName}{{background-image:url('{kvp.Key}')}}"))</style>
+        <style>@string.Join("", repeatAvatars.Select(kvp => $".{kvp.Value.ClassName}{{background-image:url('{Context.EscapeCssString(kvp.Key)}')}}"))</style>
     }
 }
 
