@@ -10,6 +10,8 @@ using CliFx;
 using CliFx.Binding;
 using CliFx.Infrastructure;
 using DiscordChatExporter.Cli.Utils.Extensions;
+using DiscordChatExporter.Core.Discord;
+using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Exporting.Converting;
 using DiscordChatExporter.Core.Exporting.Filtering;
@@ -274,15 +276,20 @@ public partial class ConvertCommand : ICommand
             && !Directory.Exists(OutputPath)
             && !Path.EndsInDirectorySeparator(OutputPath);
 
-        ExportRequest CreateRequest(ExportedChat chat) =>
+        ExportRequest CreateRequest(
+            Guild guild,
+            Channel channel,
+            Snowflake? after,
+            Snowflake? before
+        ) =>
             new(
-                chat.Guild,
-                chat.Channel,
+                guild,
+                channel,
                 OutputPath,
                 AssetsDirPath,
                 ExportFormat,
-                chat.After,
-                chat.Before,
+                after,
+                before,
                 PartitionLimit,
                 MessageFilter,
                 false,
@@ -359,14 +366,21 @@ public partial class ConvertCommand : ICommand
                 return false;
             }
 
+            var (guild, channel, after, before) = ExportedChatParser.ParseMetadata(firstFilePath);
+            var request = CreateRequest(guild, channel, after, before);
+
+            if (
+                ShouldSkipUnchanged && IsOutputNewerThanInput(firstFilePath, request.OutputFilePath)
+            )
+            {
+                return false;
+            }
+
             await using var firstStream = File.OpenRead(firstFilePath);
             using var firstDoc = await JsonDocument.ParseAsync(
                 firstStream,
                 cancellationToken: innerCancellationToken
             );
-
-            var firstChatForRequest = ExportedChatParser.Parse(firstDoc.RootElement);
-            var request = CreateRequest(firstChatForRequest);
 
             Func<string, string>? rebaseLocalAssetPath = null;
             if (ShouldDownloadAssets)
@@ -387,11 +401,6 @@ public partial class ConvertCommand : ICommand
             }
 
             var firstChat = ExportedChatParser.Parse(firstDoc.RootElement, rebaseLocalAssetPath);
-
-            if (
-                ShouldSkipUnchanged && IsOutputNewerThanInput(firstFilePath, request.OutputFilePath)
-            )
-                return false;
 
             var chatProviders = new Func<CancellationToken, ValueTask<ExportedChat>>[
                 groupFilePaths.Count

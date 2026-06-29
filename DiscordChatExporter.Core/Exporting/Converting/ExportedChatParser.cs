@@ -145,12 +145,7 @@ public static class ExportedChatParser
         Func<string, string>? rebaseLocalAssetPath = null
     )
     {
-        CollectMember(
-            messageJson.GetProperty("author"),
-            members,
-            roles,
-            rebaseLocalAssetPath
-        );
+        CollectMember(messageJson.GetProperty("author"), members, roles, rebaseLocalAssetPath);
 
         foreach (
             var userJson in messageJson.GetPropertyOrNull("mentions")?.EnumerateArrayOrNull() ?? []
@@ -175,6 +170,119 @@ public static class ExportedChatParser
                     ?? []
             )
                 CollectMember(userJson, members, roles, rebaseLocalAssetPath);
+        }
+    }
+
+    public static (Guild Guild, Channel Channel, Snowflake? After, Snowflake? Before) ParseMetadata(
+        string filePath
+    )
+    {
+        try
+        {
+            using var stream = System.IO.File.OpenRead(filePath);
+            var buffer = new byte[262144]; // 256KB
+            var bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+            var reader = new Utf8JsonReader(buffer.AsSpan(0, bytesRead));
+
+            Guild? guild = null;
+            Channel? channel = null;
+            Snowflake? after = null;
+            Snowflake? before = null;
+
+            if (reader.Read() && reader.TokenType == JsonTokenType.StartObject)
+            {
+                while (reader.Read())
+                {
+                    if (reader.TokenType == JsonTokenType.EndObject)
+                        break;
+
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        var propertyName = reader.GetString();
+                        reader.Read();
+
+                        if (
+                            string.Equals(propertyName, "guild", StringComparison.OrdinalIgnoreCase)
+                        )
+                        {
+                            using var doc = JsonDocument.ParseValue(ref reader);
+                            guild = ParseGuild(doc.RootElement);
+                        }
+                        else if (
+                            string.Equals(
+                                propertyName,
+                                "channel",
+                                StringComparison.OrdinalIgnoreCase
+                            )
+                        )
+                        {
+                            if (guild == null)
+                                break; // Trigger fallback
+                            using var doc = JsonDocument.ParseValue(ref reader);
+                            channel = ParseChannel(doc.RootElement, guild.Id);
+                        }
+                        else if (
+                            string.Equals(
+                                propertyName,
+                                "dateRange",
+                                StringComparison.OrdinalIgnoreCase
+                            )
+                        )
+                        {
+                            using var doc = JsonDocument.ParseValue(ref reader);
+                            after = doc
+                                .RootElement.GetPropertyOrNull("after")
+                                ?.GetDateTimeOffsetOrNull()
+                                ?.Pipe(Snowflake.FromDate);
+                            before = doc
+                                .RootElement.GetPropertyOrNull("before")
+                                ?.GetDateTimeOffsetOrNull()
+                                ?.Pipe(Snowflake.FromDate);
+                        }
+                        else if (
+                            string.Equals(
+                                propertyName,
+                                "messages",
+                                StringComparison.OrdinalIgnoreCase
+                            )
+                        )
+                        {
+                            if (guild != null && channel != null)
+                                return (guild, channel, after, before);
+                            break; // Trigger fallback
+                        }
+                        else
+                        {
+                            reader.Skip();
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Ignore reader exceptions and fall back to full parsing
+        }
+
+        // Fallback: Parse full document
+        using (var stream = System.IO.File.OpenRead(filePath))
+        using (var doc = JsonDocument.Parse(stream))
+        {
+            var guild = ParseGuild(doc.RootElement.GetProperty("guild"));
+            var channel = ParseChannel(doc.RootElement.GetProperty("channel"), guild.Id);
+
+            var dateRange = doc.RootElement.GetProperty("dateRange");
+            var after = dateRange
+                .GetPropertyOrNull("after")
+                ?.GetDateTimeOffsetOrNull()
+                ?.Pipe(Snowflake.FromDate);
+            var before = dateRange
+                .GetPropertyOrNull("before")
+                ?.GetDateTimeOffsetOrNull()
+                ?.Pipe(Snowflake.FromDate);
+
+            return (guild, channel, after, before);
         }
     }
 
