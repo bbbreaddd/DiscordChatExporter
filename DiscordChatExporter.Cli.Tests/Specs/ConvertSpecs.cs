@@ -395,6 +395,53 @@ public class ConvertSpecs
     }
 
     [Fact]
+    public async Task I_can_convert_a_JSON_export_to_html_using_rebased_cached_asset_paths()
+    {
+        // Arrange
+        using var inputDir = TempDirectory.Create();
+        using var outputDir = TempDirectory.Create();
+
+        var json = await File.ReadAllTextAsync(SampleExportFilePath);
+        json = json.Replace(
+            "\"iconUrl\": \"https://cdn.discordapp.com/embed/avatars/0.png\"",
+            "\"iconUrl\": \"https://cdn.discordapp.com/embed/avatars/0.png\",\n    \"iconLocalPath\": \"media/guild.png\""
+        );
+        json = json.Replace(
+            "\"avatarUrl\": \"https://cdn.discordapp.com/embed/avatars/1.png\"",
+            "\"avatarUrl\": \"https://cdn.discordapp.com/embed/avatars/1.png\",\n        \"avatarLocalPath\": \"media/alice.png\""
+        );
+        json = json.Replace(
+            "\"url\": \"https://cdn.discordapp.com/attachments/1063903591533404161/1100000000000000010/image.png\"",
+            "\"url\": \"https://cdn.discordapp.com/attachments/1063903591533404161/1100000000000000010/image.png\",\n          \"localPath\": \"media/image.png\""
+        );
+
+        var inputFilePath = Path.Combine(inputDir.Path, "sample-export.json");
+        await File.WriteAllTextAsync(inputFilePath, json);
+
+        var htmlDirPath = Path.Combine(outputDir.Path, "html");
+        Directory.CreateDirectory(htmlDirPath);
+        var outputFilePath = Path.Combine(htmlDirPath, "output.html");
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [inputFilePath],
+            OutputPath = outputFilePath,
+            ExportFormat = ExportFormat.HtmlDark,
+            ShouldDownloadAssets = true,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        var content = await File.ReadAllTextAsync(outputFilePath);
+
+        // Assert
+        content.Should().Contain("media/alice.png");
+        content.Should().Contain("media/image.png");
+        content.Should().Contain("media/guild.png");
+    }
+
+    [Fact]
     public async Task I_can_convert_a_partitioned_JSON_export_and_merge_them_correctly()
     {
         // Arrange

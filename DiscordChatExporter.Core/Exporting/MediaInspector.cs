@@ -32,6 +32,13 @@ public record MediaInspectionResult(
 // cache, so that a later offline 'convert' run can reference them all locally.
 public static class MediaInspector
 {
+    private static bool IsHttpUrl(string? url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && (
+            string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+        );
+
     // Upper bound on how long a single asset download (including retries) may run before it's
     // treated as failed. Large enough for legitimate Discord files, small enough that dead hosts
     // don't stall the sweep.
@@ -55,22 +62,28 @@ public static class MediaInspector
     private static IEnumerable<string> GetMediaUrls(Message message)
     {
         foreach (var attachment in message.Attachments)
-            yield return attachment.Url;
+        {
+            if (IsHttpUrl(attachment.Url))
+                yield return attachment.Url;
+        }
 
         foreach (var sticker in message.Stickers)
-            yield return sticker.SourceUrl;
+        {
+            if (IsHttpUrl(sticker.SourceUrl))
+                yield return sticker.SourceUrl;
+        }
 
         foreach (var embed in message.Embeds)
         {
             var thumbnailUrl = embed.Thumbnail?.ProxyUrl ?? embed.Thumbnail?.Url;
-            if (!string.IsNullOrWhiteSpace(thumbnailUrl))
-                yield return thumbnailUrl;
+            if (IsHttpUrl(thumbnailUrl))
+                yield return thumbnailUrl!;
 
             foreach (var image in embed.Images)
             {
                 var imageUrl = image.ProxyUrl ?? image.Url;
-                if (!string.IsNullOrWhiteSpace(imageUrl))
-                    yield return imageUrl;
+                if (IsHttpUrl(imageUrl))
+                    yield return imageUrl!;
             }
         }
     }

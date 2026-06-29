@@ -38,6 +38,23 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             ? await PlainTextMarkdownVisitor.FormatAsync(Context, markdown, cancellationToken)
             : markdown;
 
+    private async ValueTask WriteAssetUrlAsync(
+        string propertyName,
+        string url,
+        string? localPathPropertyName = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        _writer.WriteString(propertyName, await Context.ResolveAssetUrlAsync(url, cancellationToken));
+
+        if (!string.IsNullOrWhiteSpace(localPathPropertyName))
+        {
+            var localPath = await Context.TryGetCachedAssetLocalPathAsync(url, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(localPath))
+                _writer.WriteString(localPathPropertyName, localPath);
+        }
+    }
+
     private async ValueTask WriteUserAsync(
         User user,
         bool includeRoles = true,
@@ -64,12 +81,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             await WriteRolesAsync(Context.GetUserRoles(user.Id), cancellationToken);
         }
 
-        _writer.WriteString(
+        await WriteAssetUrlAsync(
             "avatarUrl",
-            await Context.ResolveAssetUrlAsync(
-                Context.TryGetMember(user.Id)?.AvatarUrl ?? user.AvatarUrl,
-                cancellationToken
-            )
+            Context.TryGetMember(user.Id)?.AvatarUrl ?? user.AvatarUrl,
+            "avatarLocalPath",
+            cancellationToken
         );
 
         _writer.WriteEndObject();
@@ -127,17 +143,12 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteStartObject();
 
         _writer.WriteString("id", attachment.Id.ToString());
-        _writer.WriteString(
+        await WriteAssetUrlAsync(
             "url",
-            await Context.ResolveAssetUrlAsync(attachment.Url, cancellationToken)
-        );
-
-        var cachedLocalPath = await Context.TryGetCachedAssetLocalPathAsync(
             attachment.Url,
+            "localPath",
             cancellationToken
         );
-        if (cachedLocalPath is not null)
-            _writer.WriteString("localPath", cachedLocalPath);
 
         _writer.WriteString("fileName", attachment.FileName);
         _writer.WriteNumber("fileSizeBytes", attachment.FileSize.TotalBytes);
@@ -157,12 +168,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (!string.IsNullOrWhiteSpace(embedAuthor.IconUrl))
         {
-            _writer.WriteString(
+            await WriteAssetUrlAsync(
                 "iconUrl",
-                await Context.ResolveAssetUrlAsync(
-                    embedAuthor.IconProxyUrl ?? embedAuthor.IconUrl,
-                    cancellationToken
-                )
+                embedAuthor.IconProxyUrl ?? embedAuthor.IconUrl,
+                "iconLocalPath",
+                cancellationToken
             );
 
             _writer.WriteString("iconCanonicalUrl", embedAuthor.IconUrl);
@@ -181,12 +191,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (!string.IsNullOrWhiteSpace(embedImage.Url))
         {
-            _writer.WriteString(
+            await WriteAssetUrlAsync(
                 "url",
-                await Context.ResolveAssetUrlAsync(
-                    embedImage.ProxyUrl ?? embedImage.Url,
-                    cancellationToken
-                )
+                embedImage.ProxyUrl ?? embedImage.Url,
+                "localPath",
+                cancellationToken
             );
 
             _writer.WriteString("canonicalUrl", embedImage.Url);
@@ -208,12 +217,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (!string.IsNullOrWhiteSpace(embedVideo.Url))
         {
-            _writer.WriteString(
+            await WriteAssetUrlAsync(
                 "url",
-                await Context.ResolveAssetUrlAsync(
-                    embedVideo.ProxyUrl ?? embedVideo.Url,
-                    cancellationToken
-                )
+                embedVideo.ProxyUrl ?? embedVideo.Url,
+                "localPath",
+                cancellationToken
             );
 
             _writer.WriteString("canonicalUrl", embedVideo.Url);
@@ -237,12 +245,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (!string.IsNullOrWhiteSpace(embedFooter.IconUrl))
         {
-            _writer.WriteString(
+            await WriteAssetUrlAsync(
                 "iconUrl",
-                await Context.ResolveAssetUrlAsync(
-                    embedFooter.IconProxyUrl ?? embedFooter.IconUrl,
-                    cancellationToken
-                )
+                embedFooter.IconProxyUrl ?? embedFooter.IconUrl,
+                "iconLocalPath",
+                cancellationToken
             );
 
             _writer.WriteString("iconCanonicalUrl", embedFooter.IconUrl);
@@ -371,9 +378,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteString("id", sticker.Id.ToString());
         _writer.WriteString("name", sticker.Name);
         _writer.WriteString("format", sticker.Format.ToString());
-        _writer.WriteString(
+        await WriteAssetUrlAsync(
             "sourceUrl",
-            await Context.ResolveAssetUrlAsync(sticker.SourceUrl, cancellationToken)
+            sticker.SourceUrl,
+            "sourceLocalPath",
+            cancellationToken
         );
 
         _writer.WriteEndObject();
@@ -391,9 +400,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         _writer.WriteString("id", Context.Request.Guild.Id.ToString());
         _writer.WriteString("name", Context.Request.Guild.Name);
 
-        _writer.WriteString(
+        await WriteAssetUrlAsync(
             "iconUrl",
-            await Context.ResolveAssetUrlAsync(Context.Request.Guild.IconUrl, cancellationToken)
+            Context.Request.Guild.IconUrl,
+            "iconLocalPath",
+            cancellationToken
         );
 
         _writer.WriteEndObject();
@@ -421,12 +432,11 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
 
         if (!string.IsNullOrWhiteSpace(Context.Request.Channel.IconUrl))
         {
-            _writer.WriteString(
+            await WriteAssetUrlAsync(
                 "iconUrl",
-                await Context.ResolveAssetUrlAsync(
-                    Context.Request.Channel.IconUrl,
-                    cancellationToken
-                )
+                Context.Request.Channel.IconUrl,
+                "iconLocalPath",
+                cancellationToken
             );
         }
 

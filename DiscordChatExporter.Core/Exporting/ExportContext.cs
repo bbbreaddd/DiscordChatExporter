@@ -180,6 +180,17 @@ internal class ExportContext(
         CancellationToken cancellationToken = default
     )
     {
+        if (
+            !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || (
+                !string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+            )
+        )
+        {
+            return url;
+        }
+
         if (!Request.ShouldDownloadAssets && !Request.ShouldCacheAssetsOnly)
             return url;
 

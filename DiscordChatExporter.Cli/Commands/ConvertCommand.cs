@@ -14,6 +14,7 @@ using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Exporting.Converting;
 using DiscordChatExporter.Core.Exporting.Filtering;
 using DiscordChatExporter.Core.Exporting.Partitioning;
+using DiscordChatExporter.Core.Utils;
 using Gress;
 using Spectre.Console;
 
@@ -351,8 +352,28 @@ public partial class ConvertCommand : ICommand
                 cancellationToken: innerCancellationToken
             );
 
-            var firstChat = ExportedChatParser.Parse(firstDoc.RootElement);
-            var request = CreateRequest(firstChat);
+            var firstChatForRequest = ExportedChatParser.Parse(firstDoc.RootElement);
+            var request = CreateRequest(firstChatForRequest);
+
+            Func<string, string>? rebaseLocalAssetPath = null;
+            if (ShouldDownloadAssets)
+            {
+                rebaseLocalAssetPath = relativeLocalPath =>
+                {
+                    var inputDirPath =
+                        Path.GetDirectoryName(firstFilePath) ?? Directory.GetCurrentDirectory();
+                    var absolutePath = Path.GetFullPath(
+                        Path.Combine(inputDirPath, relativeLocalPath)
+                    );
+                    var rebasedPath = Path.GetRelativePath(request.OutputDirPath, absolutePath);
+
+                    return request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight
+                        ? Url.EncodeFilePath(rebasedPath)
+                        : rebasedPath;
+                };
+            }
+
+            var firstChat = ExportedChatParser.Parse(firstDoc.RootElement, rebaseLocalAssetPath);
 
             if (
                 ShouldSkipUnchanged && IsOutputNewerThanInput(firstFilePath, request.OutputFilePath)
@@ -370,7 +391,7 @@ public partial class ConvertCommand : ICommand
                 {
                     await using var stream = File.OpenRead(filePath);
                     using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-                    return ExportedChatParser.Parse(doc.RootElement);
+                    return ExportedChatParser.Parse(doc.RootElement, rebaseLocalAssetPath);
                 };
             }
 

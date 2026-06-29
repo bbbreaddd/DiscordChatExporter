@@ -15,7 +15,18 @@ namespace DiscordChatExporter.Core.Exporting.Converting;
 // which is distinct from the live Discord API schema parsed by Discord/Data/*.Parse(JsonElement).
 internal static class ExportedMessageParser
 {
-    public static User ParseUser(JsonElement json)
+    private static string? RebaseLocalAssetPath(
+        string? localPath,
+        Func<string, string>? rebaseLocalAssetPath = null
+    ) =>
+        !string.IsNullOrWhiteSpace(localPath) && rebaseLocalAssetPath is not null
+            ? rebaseLocalAssetPath(localPath)
+            : localPath;
+
+    public static User ParseUser(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
         var isBot = json.GetPropertyOrNull("isBot")?.GetBooleanOrNull() ?? false;
@@ -31,7 +42,11 @@ internal static class ExportedMessageParser
         var name = json.GetProperty("name").GetNonNullString();
         var displayName =
             json.GetPropertyOrNull("nickname")?.GetNonWhiteSpaceStringOrNull() ?? name;
-        var avatarUrl = json.GetProperty("avatarUrl").GetNonWhiteSpaceString();
+        var avatarUrl =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("avatarLocalPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetProperty("avatarUrl").GetNonWhiteSpaceString();
 
         return new User(id, isBot, discriminator, name, displayName, avatarUrl);
     }
@@ -63,10 +78,17 @@ internal static class ExportedMessageParser
         return new Emoji(id, name, isAnimated);
     }
 
-    public static Attachment ParseAttachment(JsonElement json)
+    public static Attachment ParseAttachment(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
-        var url = json.GetProperty("url").GetNonWhiteSpaceString();
+        var url =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("localPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetProperty("url").GetNonWhiteSpaceString();
         var fileName = json.GetProperty("fileName").GetNonNullString();
         var fileSize = json.GetProperty("fileSizeBytes").GetInt64().Pipe(FileSize.FromBytes);
 
@@ -74,37 +96,65 @@ internal static class ExportedMessageParser
         return new Attachment(id, url, fileName, null, null, null, fileSize);
     }
 
-    public static EmbedAuthor ParseEmbedAuthor(JsonElement json)
+    public static EmbedAuthor ParseEmbedAuthor(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var name = json.GetPropertyOrNull("name")?.GetStringOrNull();
         var url = json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
-        var iconUrl = json.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull();
+        var iconUrl =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("iconLocalPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull();
 
         return new EmbedAuthor(name, url, iconUrl, null);
     }
 
-    public static EmbedImage ParseEmbedImage(JsonElement json)
+    public static EmbedImage ParseEmbedImage(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
-        var url = json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
+        var url =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("localPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
         var width = json.GetPropertyOrNull("width")?.GetInt32OrNull();
         var height = json.GetPropertyOrNull("height")?.GetInt32OrNull();
 
         return new EmbedImage(url, null, width, height);
     }
 
-    public static EmbedVideo ParseEmbedVideo(JsonElement json)
+    public static EmbedVideo ParseEmbedVideo(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
-        var url = json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
+        var url =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("localPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
         var width = json.GetPropertyOrNull("width")?.GetInt32OrNull();
         var height = json.GetPropertyOrNull("height")?.GetInt32OrNull();
 
         return new EmbedVideo(url, null, width, height);
     }
 
-    public static EmbedFooter ParseEmbedFooter(JsonElement json)
+    public static EmbedFooter ParseEmbedFooter(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var text = json.GetProperty("text").GetNonNullString();
-        var iconUrl = json.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull();
+        var iconUrl =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("iconLocalPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetPropertyOrNull("iconUrl")?.GetNonWhiteSpaceStringOrNull();
 
         return new EmbedFooter(text, iconUrl, null);
     }
@@ -118,7 +168,10 @@ internal static class ExportedMessageParser
         return new EmbedField(name, value, isInline);
     }
 
-    public static Embed ParseEmbed(JsonElement json)
+    public static Embed ParseEmbed(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var title = json.GetPropertyOrNull("title")?.GetNonWhiteSpaceStringOrNull();
         var url = json.GetPropertyOrNull("url")?.GetNonWhiteSpaceStringOrNull();
@@ -129,15 +182,23 @@ internal static class ExportedMessageParser
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(ColorTranslator.FromHtml);
 
-        var author = json.GetPropertyOrNull("author")?.Pipe(ParseEmbedAuthor);
-        var thumbnail = json.GetPropertyOrNull("thumbnail")?.Pipe(ParseEmbedImage);
-        var video = json.GetPropertyOrNull("video")?.Pipe(ParseEmbedVideo);
-        var footer = json.GetPropertyOrNull("footer")?.Pipe(ParseEmbedFooter);
+        var author = json.GetPropertyOrNull("author")?.Pipe(j =>
+            ParseEmbedAuthor(j, rebaseLocalAssetPath)
+        );
+        var thumbnail = json.GetPropertyOrNull("thumbnail")?.Pipe(j =>
+            ParseEmbedImage(j, rebaseLocalAssetPath)
+        );
+        var video = json.GetPropertyOrNull("video")?.Pipe(j =>
+            ParseEmbedVideo(j, rebaseLocalAssetPath)
+        );
+        var footer = json.GetPropertyOrNull("footer")?.Pipe(j =>
+            ParseEmbedFooter(j, rebaseLocalAssetPath)
+        );
 
         var images =
             json.GetPropertyOrNull("images")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseEmbedImage)
+                ?.Select(j => ParseEmbedImage(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
@@ -166,26 +227,36 @@ internal static class ExportedMessageParser
         );
     }
 
-    public static Sticker ParseSticker(JsonElement json)
+    public static Sticker ParseSticker(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
         var name = json.GetProperty("name").GetNonNullString();
         var format = json.GetProperty("format")
             .GetNonNullString()
             .Pipe(s => Enum.Parse<StickerFormat>(s));
-        var sourceUrl = json.GetProperty("sourceUrl").GetNonWhiteSpaceString();
+        var sourceUrl =
+            RebaseLocalAssetPath(
+                json.GetPropertyOrNull("sourceLocalPath")?.GetNonWhiteSpaceStringOrNull(),
+                rebaseLocalAssetPath
+            ) ?? json.GetProperty("sourceUrl").GetNonWhiteSpaceString();
 
         return new Sticker(id, name, format, sourceUrl);
     }
 
-    public static Reaction ParseReaction(JsonElement json)
+    public static Reaction ParseReaction(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var emoji = json.GetProperty("emoji").Pipe(ParseEmoji);
         var count = json.GetProperty("count").GetInt32();
 
         var users = json.GetPropertyOrNull("users")
             ?.EnumerateArrayOrNull()
-            ?.Select(ParseUser)
+            ?.Select(j => ParseUser(j, rebaseLocalAssetPath))
             .ToArray();
 
         return new Reaction(emoji, count, users);
@@ -215,7 +286,10 @@ internal static class ExportedMessageParser
         return new MessageReference(kind, messageId, channelId, guildId);
     }
 
-    public static MessageSnapshot ParseMessageSnapshot(JsonElement json)
+    public static MessageSnapshot ParseMessageSnapshot(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var timestamp = json.GetProperty("timestamp").GetDateTimeOffset();
         var editedTimestamp = json.GetPropertyOrNull("timestampEdited")?.GetDateTimeOffsetOrNull();
@@ -224,18 +298,21 @@ internal static class ExportedMessageParser
         var attachments =
             json.GetPropertyOrNull("attachments")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseAttachment)
+                ?.Select(j => ParseAttachment(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
         var embeds =
-            json.GetPropertyOrNull("embeds")?.EnumerateArrayOrNull()?.Select(ParseEmbed).ToArray()
+            json.GetPropertyOrNull("embeds")
+                ?.EnumerateArrayOrNull()
+                ?.Select(j => ParseEmbed(j, rebaseLocalAssetPath))
+                .ToArray()
             ?? [];
 
         var stickers =
             json.GetPropertyOrNull("stickers")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseSticker)
+                ?.Select(j => ParseSticker(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
@@ -249,16 +326,22 @@ internal static class ExportedMessageParser
         );
     }
 
-    public static Interaction ParseInteraction(JsonElement json)
+    public static Interaction ParseInteraction(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
         var name = json.GetProperty("name").GetNonNullString();
-        var user = json.GetProperty("user").Pipe(ParseUser);
+        var user = ParseUser(json.GetProperty("user"), rebaseLocalAssetPath);
 
         return new Interaction(id, name, user);
     }
 
-    public static Message ParseMessage(JsonElement json)
+    public static Message ParseMessage(
+        JsonElement json,
+        Func<string, string>? rebaseLocalAssetPath = null
+    )
     {
         var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
         var kind = json.GetProperty("type")
@@ -285,44 +368,52 @@ internal static class ExportedMessageParser
                 : "";
         }
 
-        var author = json.GetProperty("author").Pipe(ParseUser);
+        var author = ParseUser(json.GetProperty("author"), rebaseLocalAssetPath);
 
         var attachments =
             json.GetPropertyOrNull("attachments")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseAttachment)
+                ?.Select(j => ParseAttachment(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
         var embeds =
-            json.GetPropertyOrNull("embeds")?.EnumerateArrayOrNull()?.Select(ParseEmbed).ToArray()
+            json.GetPropertyOrNull("embeds")
+                ?.EnumerateArrayOrNull()
+                ?.Select(j => ParseEmbed(j, rebaseLocalAssetPath))
+                .ToArray()
             ?? [];
 
         var stickers =
             json.GetPropertyOrNull("stickers")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseSticker)
+                ?.Select(j => ParseSticker(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
         var reactions =
             json.GetPropertyOrNull("reactions")
                 ?.EnumerateArrayOrNull()
-                ?.Select(ParseReaction)
+                ?.Select(j => ParseReaction(j, rebaseLocalAssetPath))
                 .ToArray()
             ?? [];
 
         var mentionedUsers =
-            json.GetPropertyOrNull("mentions")?.EnumerateArrayOrNull()?.Select(ParseUser).ToArray()
+            json.GetPropertyOrNull("mentions")
+                ?.EnumerateArrayOrNull()
+                ?.Select(j => ParseUser(j, rebaseLocalAssetPath))
+                .ToArray()
             ?? [];
 
         var reference = json.GetPropertyOrNull("reference")?.Pipe(ParseMessageReference);
 
         // The export schema doesn't include the full referenced message, only its reference
         var forwardedMessage = json.GetPropertyOrNull("forwardedMessage")
-            ?.Pipe(ParseMessageSnapshot);
+            ?.Pipe(j => ParseMessageSnapshot(j, rebaseLocalAssetPath));
 
-        var interaction = json.GetPropertyOrNull("interaction")?.Pipe(ParseInteraction);
+        var interaction = json.GetPropertyOrNull("interaction")?.Pipe(j =>
+            ParseInteraction(j, rebaseLocalAssetPath)
+        );
 
         return new Message(
             id,
