@@ -163,7 +163,16 @@
                         }
 
                         // Avatar
-                        <img class="@GetClass("chatlog__avatar")" src="@await ResolveAssetUrlAsync(authorMember?.AvatarUrl ?? message.Author.AvatarUrl)" alt="Avatar" loading="lazy">
+                        var authorUrl = await ResolveAssetUrlAsync(authorMember?.AvatarUrl ?? message.Author.AvatarUrl);
+                        var authorAvatar = Context.GetAvatarRenderInfo(authorUrl);
+                        if (authorAvatar.TagType == "span")
+                        {
+                            <span class="@authorAvatar.ClassName" @Html.Raw(authorAvatar.SrcOrAria)></span>
+                        }
+                        else
+                        {
+                            <img class="@authorAvatar.ClassName" @Html.Raw(authorAvatar.SrcOrAria)>
+                        }
                     }
                     else
                     {
@@ -186,7 +195,16 @@
                                         ? message.ReferencedMessage.Author.DisplayName
                                         : referencedUserMember?.DisplayName ?? message.ReferencedMessage.Author.DisplayName;
 
-                                    <img class="@GetClass("chatlog__reply-avatar")" src="@await ResolveAssetUrlAsync(referencedUserMember?.AvatarUrl ?? message.ReferencedMessage.Author.AvatarUrl)" alt="Avatar" loading="lazy">
+                                     var replyUrl = await ResolveAssetUrlAsync(referencedUserMember?.AvatarUrl ?? message.ReferencedMessage.Author.AvatarUrl);
+                                     var replyAvatar = Context.GetReplyAvatarRenderInfo(replyUrl);
+                                     if (replyAvatar.TagType == "span")
+                                     {
+                                         <span class="@replyAvatar.ClassName" @Html.Raw(replyAvatar.SrcOrAria)></span>
+                                     }
+                                     else
+                                     {
+                                         <img class="@replyAvatar.ClassName" @Html.Raw(replyAvatar.SrcOrAria)>
+                                     }
                                     <div class="@GetClass("chatlog__reply-author")" style="@(referencedUserColor is not null ? $"color: rgb({referencedUserColor.Value.R}, {referencedUserColor.Value.G}, {referencedUserColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.ReferencedMessage.Author.FullName))>@referencedUserDisplayName</div>
                                     <div class="@GetClass("chatlog__reply-content")">
                                         <span class="@GetClass("chatlog__reply-link")" onclick="scrollToMessage(event, '@message.ReferencedMessage.Id')">
@@ -219,7 +237,16 @@
                                         ? message.Interaction.User.DisplayName
                                         : interactionUserMember?.DisplayName ?? message.Interaction.User.DisplayName;
 
-                                    <img class="@GetClass("chatlog__reply-avatar")" src="@await ResolveAssetUrlAsync(interactionUserMember?.AvatarUrl ?? message.Interaction.User.AvatarUrl)" alt="Avatar" loading="lazy">
+                                     var interactionUrl = await ResolveAssetUrlAsync(interactionUserMember?.AvatarUrl ?? message.Interaction.User.AvatarUrl);
+                                     var interactionAvatar = Context.GetReplyAvatarRenderInfo(interactionUrl);
+                                     if (interactionAvatar.TagType == "span")
+                                     {
+                                         <span class="@interactionAvatar.ClassName" @Html.Raw(interactionAvatar.SrcOrAria)></span>
+                                     }
+                                     else
+                                     {
+                                         <img class="@interactionAvatar.ClassName" @Html.Raw(interactionAvatar.SrcOrAria)>
+                                     }
                                     <div class="@GetClass("chatlog__reply-author")" style="@(interactionUserColor is not null ? $"color: rgb({interactionUserColor.Value.R}, {interactionUserColor.Value.G}, {interactionUserColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.Interaction.User.FullName))>@interactionUserDisplayName</div>
                                     <div class="@GetClass("chatlog__reply-content")">
                                         used /@message.Interaction.Name

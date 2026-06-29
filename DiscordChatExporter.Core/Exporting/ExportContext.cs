@@ -43,6 +43,10 @@ internal class ExportContext(
         StringComparer.Ordinal
     );
 
+    private readonly Dictionary<string, (string ClassName, int Count)> _avatarClasses = new(
+        StringComparer.Ordinal
+    );
+
     public DiscordClient? Discord { get; } = discord;
 
     public ExportRequest Request { get; } = request;
@@ -377,6 +381,71 @@ internal class ExportContext(
         ["postamble"] = "po",
         ["postamble__entry"] = "poe",
     };
+
+    public (string TagType, string ClassName, string SrcOrAria) GetAvatarRenderInfo(
+        string resolvedUrl
+    )
+    {
+        if (!Request.IsCompact)
+        {
+            return (
+                "img",
+                GetClass("chatlog__avatar"),
+                $"src=\"{resolvedUrl}\" alt=\"Avatar\" loading=\"lazy\""
+            );
+        }
+
+        if (!_avatarClasses.TryGetValue(resolvedUrl, out var entry))
+        {
+            _avatarClasses[resolvedUrl] = ("a" + _avatarClasses.Count, 1);
+            return (
+                "img",
+                GetClass("chatlog__avatar"),
+                $"src=\"{resolvedUrl}\" alt=\"Avatar\" loading=\"lazy\""
+            );
+        }
+
+        _avatarClasses[resolvedUrl] = (entry.ClassName, entry.Count + 1);
+        return (
+            "span",
+            $"{GetClass("chatlog__avatar")} {entry.ClassName}",
+            "aria-label=\"Avatar\" role=\"img\""
+        );
+    }
+
+    public (string TagType, string ClassName, string SrcOrAria) GetReplyAvatarRenderInfo(
+        string resolvedUrl
+    )
+    {
+        if (!Request.IsCompact)
+        {
+            return (
+                "img",
+                GetClass("chatlog__reply-avatar"),
+                $"src=\"{resolvedUrl}\" alt=\"Avatar\" loading=\"lazy\""
+            );
+        }
+
+        if (!_avatarClasses.TryGetValue(resolvedUrl, out var entry))
+        {
+            _avatarClasses[resolvedUrl] = ("a" + _avatarClasses.Count, 1);
+            return (
+                "img",
+                GetClass("chatlog__reply-avatar"),
+                $"src=\"{resolvedUrl}\" alt=\"Avatar\" loading=\"lazy\""
+            );
+        }
+
+        _avatarClasses[resolvedUrl] = (entry.ClassName, entry.Count + 1);
+        return (
+            "span",
+            $"{GetClass("chatlog__reply-avatar")} {entry.ClassName}",
+            "aria-label=\"Avatar\" role=\"img\""
+        );
+    }
+
+    public IReadOnlyDictionary<string, (string ClassName, int Count)> GetAvatarClasses() =>
+        _avatarClasses;
 
     public string GetClass(string fullClassName)
     {
