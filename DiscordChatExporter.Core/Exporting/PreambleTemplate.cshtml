@@ -37,7 +37,7 @@
     }
     else
     {
-        <style>@Html.Raw(await new HtmlStyleTemplate { Context = Context, ThemeName = ThemeName }.RenderAsync(CancellationToken))</style>
+        <style>@Html.Raw(Context.MinifyCss(await new HtmlStyleTemplate { Context = Context, ThemeName = ThemeName }.RenderAsync(CancellationToken)))</style>
     }
 
     <!--dce-highlight-style-->
@@ -50,7 +50,7 @@
     }
     else
     {
-        <script>@Html.Raw(await new HtmlScriptTemplate().RenderAsync(CancellationToken))</script>
+        <script>@Html.Raw(await new HtmlScriptTemplate { Context = Context }.RenderAsync(CancellationToken))</script>
     }
 
     @if (!Context.Request.ShouldUseHtmlSharedAssets)
@@ -62,22 +62,22 @@
 </head>
 <body>
 
-<div class="preamble">
-    <div class="preamble__guild-icon-container">
-        <img class="preamble__guild-icon" src="@await ResolveAssetUrlAsync(Context.Request.Channel.IconUrl ?? Context.Request.Guild.IconUrl)" alt="Guild icon" loading="lazy">
+<div class="@Context.GetClass("preamble")">
+    <div class="@Context.GetClass("preamble__guild-icon-container")">
+        <img class="@Context.GetClass("preamble__guild-icon")" src="@await ResolveAssetUrlAsync(Context.Request.Channel.IconUrl ?? Context.Request.Guild.IconUrl)" alt="Guild icon" loading="lazy">
     </div>
-    <div class="preamble__entries-container">
-        <div class="preamble__entry">@Context.Request.Guild.Name</div>
-        <div class="preamble__entry">@Context.Request.Channel.GetHierarchicalName()</div>
+    <div class="@Context.GetClass("preamble__entries-container")">
+        <div class="@Context.GetClass("preamble__entry")">@Context.Request.Guild.Name</div>
+        <div class="@Context.GetClass("preamble__entry")">@Context.Request.Channel.GetHierarchicalName()</div>
 
         @if (!string.IsNullOrWhiteSpace(Context.Request.Channel.Topic))
         {
-            <div class="preamble__entry preamble__entry--small">@(await FormatMarkdownAsync(Context.Request.Channel.Topic))</div>
+            <div class="@Context.GetClass("preamble__entry preamble__entry--small")">@(await FormatMarkdownAsync(Context.Request.Channel.Topic))</div>
         }
 
         @if (Context.Request.After is not null || Context.Request.Before is not null)
         {
-            <div class="preamble__entry preamble__entry--small">
+            <div class="@Context.GetClass("preamble__entry preamble__entry--small")">
                 @if (Context.Request.After is not null && Context.Request.Before is not null)
                 {
                     @($"Between {FormatDate(Context.Request.After.Value.ToDate())} and {FormatDate(Context.Request.Before.Value.ToDate())}")
@@ -100,5 +100,5 @@
 <!--/wmm:ignore-->
 
 <!--wmm:ignore-->
-<div class="chatlog">
+<div class="@Context.GetClass("chatlog")">
 <!--/wmm:ignore-->

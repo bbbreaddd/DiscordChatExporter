@@ -205,6 +205,15 @@
                             <ToggleSwitch DockPanel.Dock="Right" IsChecked="{Binding ShouldFormatMarkdown}" />
                         </DockPanel>
 
+                        <!--  Compact mode  -->
+                        <DockPanel
+                            IsEnabled="{Binding IsFormatHtml}"
+                            LastChildFill="False"
+                            ToolTip.Tip="{Binding LocalizationManager.CompactModeTooltip}">
+                            <TextBlock DockPanel.Dock="Left" Text="{Binding LocalizationManager.CompactModeLabel}" />
+                            <ToggleSwitch DockPanel.Dock="Right" IsChecked="{Binding IsCompact}" />
+                        </DockPanel>
+
                         <!--  Download assets  -->
                         <DockPanel LastChildFill="False" ToolTip.Tip="{Binding LocalizationManager.DownloadAssetsTooltip}">
                             <TextBlock DockPanel.Dock="Left" Text="{Binding LocalizationManager.DownloadAssetsLabel}" />

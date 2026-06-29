@@ -63,14 +63,14 @@ internal partial class HtmlMarkdownVisitor(
 
             FormattingKind.Spoiler => (
                 // lang=html
-                """<span class="chatlog__markdown-spoiler chatlog__markdown-spoiler--hidden" onclick="showSpoiler(event, this)">""",
+                $"<span class=\"{context.GetClass("chatlog__markdown-spoiler chatlog__markdown-spoiler--hidden")}\" onclick=\"showSpoiler(event, this)\">",
                 // lang=html
                 """</span>"""
             ),
 
             FormattingKind.Quote => (
                 // lang=html
-                """<div class="chatlog__markdown-quote"><div class="chatlog__markdown-quote-border"></div><div class="chatlog__markdown-quote-content">""",
+                $"<div class=\"{context.GetClass("chatlog__markdown-quote")}\"><div class=\"{context.GetClass("chatlog__markdown-quote-border")}\"></div><div class=\"{context.GetClass("chatlog__markdown-quote-content")}\">",
                 // lang=html
                 """</div></div>"""
             ),
@@ -147,7 +147,7 @@ internal partial class HtmlMarkdownVisitor(
         buffer.Append(
             // lang=html
             $"""
-            <code class="chatlog__markdown-pre chatlog__markdown-pre--inline">{HtmlEncode(
+            <code class="{context.GetClass("chatlog__markdown-pre chatlog__markdown-pre--inline")}">{HtmlEncode(
                 inlineCodeBlock.Code
             )}</code>
             """
@@ -168,7 +168,7 @@ internal partial class HtmlMarkdownVisitor(
         buffer.Append(
             // lang=html
             $"""
-            <code class="chatlog__markdown-pre chatlog__markdown-pre--multiline {highlightClass}">{HtmlEncode(
+            <code class="{context.GetClass("chatlog__markdown-pre chatlog__markdown-pre--multiline")} {highlightClass}">{HtmlEncode(
                 multiLineCodeBlock.Code
             )}</code>
             """
@@ -210,15 +210,18 @@ internal partial class HtmlMarkdownVisitor(
     )
     {
         var jumboClass = isJumbo ? "chatlog__emoji--large" : "";
+        var emojiClass = context.GetClass($"chatlog__emoji {jumboClass}".Trim());
+        var titleAttr = context.Request.IsCompact
+            ? ""
+            : $"\n    title=\"{HtmlEncode(emoji.Code)}\"";
 
         buffer.Append(
             // lang=html
             $"""
             <img
                 loading="lazy"
-                class="chatlog__emoji {jumboClass}"
-                alt="{HtmlEncode(emoji.Name)}"
-                title="{HtmlEncode(emoji.Code)}"
+                class="{emojiClass}"
+                alt="{HtmlEncode(emoji.Name)}"{titleAttr}
                 src="{HtmlEncode(
                 await context.ResolveAssetUrlAsync(emoji.ImageUrl, cancellationToken)
             )}">
@@ -235,8 +238,8 @@ internal partial class HtmlMarkdownVisitor(
         {
             buffer.Append(
                 // lang=html
-                """
-                <span class="chatlog__markdown-mention">@everyone</span>
+                $"""
+                <span class="{context.GetClass("chatlog__markdown-mention")}">@everyone</span>
                 """
             );
         }
@@ -244,8 +247,8 @@ internal partial class HtmlMarkdownVisitor(
         {
             buffer.Append(
                 // lang=html
-                """
-                <span class="chatlog__markdown-mention">@here</span>
+                $"""
+                <span class="{context.GetClass("chatlog__markdown-mention")}">@here</span>
                 """
             );
         }
@@ -260,11 +263,12 @@ internal partial class HtmlMarkdownVisitor(
             var member = mention.TargetId?.Pipe(context.TryGetMember);
             var fullName = member?.User.FullName ?? "Unknown";
             var displayName = member?.DisplayName ?? member?.User.DisplayName ?? "Unknown";
+            var titleAttr = context.Request.IsCompact ? "" : $" title=\"{HtmlEncode(fullName)}\"";
 
             buffer.Append(
                 // lang=html
                 $"""
-                <span class="chatlog__markdown-mention" title="{HtmlEncode(fullName)}">@{HtmlEncode(
+                <span class="{context.GetClass("chatlog__markdown-mention")}"{titleAttr}>@{HtmlEncode(
                     displayName
                 )}</span>
                 """
@@ -285,7 +289,9 @@ internal partial class HtmlMarkdownVisitor(
             buffer.Append(
                 // lang=html
                 $"""
-                <span class="chatlog__markdown-mention">{symbol}{HtmlEncode(name)}</span>
+                <span class="{context.GetClass("chatlog__markdown-mention")}">{symbol}{HtmlEncode(
+                    name
+                )}</span>
                 """
             );
         }
@@ -302,7 +308,9 @@ internal partial class HtmlMarkdownVisitor(
             buffer.Append(
                 // lang=html
                 $"""
-                <span class="chatlog__markdown-mention" style="{style}">@{HtmlEncode(name)}</span>
+                <span class="{context.GetClass(
+                    "chatlog__markdown-mention"
+                )}" style="{style}">@{HtmlEncode(name)}</span>
                 """
             );
         }
@@ -320,13 +328,14 @@ internal partial class HtmlMarkdownVisitor(
         var formattedLong = timestamp.Instant is not null
             ? context.FormatDate(timestamp.Instant.Value, "f")
             : "";
+        var titleAttr = context.Request.IsCompact ? "" : $" title=\"{HtmlEncode(formattedLong)}\"";
 
         buffer.Append(
             // lang=html
             $"""
-            <span class="chatlog__markdown-timestamp" title="{HtmlEncode(
-                formattedLong
-            )}">{HtmlEncode(formatted)}</span>
+            <span class="{context.GetClass("chatlog__markdown-timestamp")}"{titleAttr}>{HtmlEncode(
+                formatted
+            )}</span>
             """
         );
 

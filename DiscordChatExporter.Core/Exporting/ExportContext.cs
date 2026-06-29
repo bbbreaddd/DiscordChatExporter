@@ -184,7 +184,11 @@ internal class ExportContext(
             !Uri.TryCreate(url, UriKind.Absolute, out var uri)
             || (
                 !string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(
+                    uri.Scheme,
+                    Uri.UriSchemeHttps,
+                    StringComparison.OrdinalIgnoreCase
+                )
             )
         )
         {
@@ -243,5 +247,176 @@ internal class ExportContext(
         {
             return null;
         }
+    }
+
+    private static readonly Dictionary<string, string> ClassMap = new(StringComparer.Ordinal)
+    {
+        ["chatlog"] = "cl",
+        ["preamble"] = "pe",
+        ["preamble__guild-icon-container"] = "pic",
+        ["preamble__guild-icon"] = "pi",
+        ["preamble__entries-container"] = "ec",
+        ["preamble__entry"] = "ee",
+        ["preamble__entry--small"] = "ees",
+        ["chatlog__message-group"] = "mg",
+        ["chatlog__message-container"] = "mc",
+        ["chatlog__message-container--pinned"] = "mcp",
+        ["chatlog__message-container--highlighted"] = "mch",
+        ["chatlog__message"] = "me",
+        ["chatlog__message-aside"] = "ma",
+        ["chatlog__message-primary"] = "mp",
+        ["chatlog__reply-symbol"] = "rs",
+        ["chatlog__avatar"] = "av",
+        ["chatlog__short-timestamp"] = "st",
+        ["chatlog__reply"] = "re",
+        ["chatlog__reply-avatar"] = "ra",
+        ["chatlog__reply-author"] = "ru",
+        ["chatlog__reply-content"] = "rc",
+        ["chatlog__reply-link"] = "rl",
+        ["chatlog__reply-edited-timestamp"] = "rt",
+        ["chatlog__reply-unknown"] = "rn",
+        ["chatlog__header"] = "hd",
+        ["chatlog__author"] = "au",
+        ["chatlog__author-tag"] = "at",
+        ["chatlog__timestamp"] = "ts",
+        ["chatlog__content"] = "co",
+        ["chatlog__markdown"] = "md",
+        ["chatlog__markdown-preserve"] = "pr",
+        ["chatlog__attachment"] = "ac",
+        ["chatlog__attachment--hidden"] = "ach",
+        ["chatlog__attachment-media"] = "am",
+        ["chatlog__attachment-media--hidden"] = "amh",
+        ["chatlog__attachment-media-spoiler"] = "ams",
+        ["chatlog__attachment-media-spoiler-label"] = "amsl",
+        ["chatlog__attachment-spoiler-caption"] = "asc",
+        ["chatlog__attachment-generic"] = "ag",
+        ["chatlog__attachment-generic-icon"] = "agi",
+        ["chatlog__attachment-generic-name"] = "agn",
+        ["chatlog__attachment-generic-size"] = "ags",
+        ["chatlog__forwarded-attachments"] = "fa",
+        ["chatlog__forwarded-attachment"] = "fm",
+        ["chatlog__forwarded"] = "fw",
+        ["chatlog__forwarded-header"] = "fwh",
+        ["chatlog__forwarded-icon"] = "fwi",
+        ["chatlog__forwarded-content"] = "fwc",
+        ["chatlog__forwarded-timestamp"] = "fwt",
+        ["chatlog__embed-invite-container"] = "eicn",
+        ["chatlog__embed-invite-title"] = "eiti",
+        ["chatlog__embed-invite"] = "ei",
+        ["chatlog__embed-invite-guild-icon-container"] = "eigic",
+        ["chatlog__embed-invite-guild-icon"] = "eigi",
+        ["chatlog__embed-invite-info"] = "eii",
+        ["chatlog__embed-invite-guild-name"] = "eign",
+        ["chatlog__embed-invite-channel-name"] = "eicn2",
+        ["chatlog__embed-invite-channel-icon"] = "eici",
+        ["chatlog__embed-spotify-container"] = "esc",
+        ["chatlog__embed-spotify"] = "es",
+        ["chatlog__system-notification-icon"] = "si",
+        ["chatlog__system-notification-author"] = "sa",
+        ["chatlog__system-notification-content"] = "sn",
+        ["chatlog__system-notification-link"] = "sl",
+        ["chatlog__system-notification-timestamp"] = "sy",
+        ["chatlog__markdown-spoiler"] = "sp",
+        ["chatlog__markdown-spoiler--hidden"] = "sph",
+        ["chatlog__markdown-pre"] = "cp",
+        ["chatlog__markdown-pre--inline"] = "cpi",
+        ["chatlog__markdown-pre--multiline"] = "cpm",
+        ["chatlog__sticker--media"] = "sm",
+        ["chatlog__sticker"] = "sk",
+        ["chatlog__sticker-media"] = "skm",
+        ["chatlog__embed"] = "eb",
+        ["chatlog__embed-color-pill"] = "ecp",
+        ["chatlog__embed-color-pill--default"] = "ecpd",
+        ["chatlog__embed-content-container"] = "ecc",
+        ["chatlog__embed-content"] = "eco",
+        ["chatlog__embed-text"] = "et",
+        ["chatlog__embed-author-container"] = "eac",
+        ["chatlog__embed-author-link"] = "eal",
+        ["chatlog__embed-author"] = "eau",
+        ["chatlog__embed-author-icon"] = "eai",
+        ["chatlog__embed-author-name"] = "ean",
+        ["chatlog__embed-title"] = "eti",
+        ["chatlog__embed-title-link"] = "etl",
+        ["chatlog__embed-youtube-container"] = "eyc",
+        ["chatlog__embed-youtube-thumbnail"] = "eyt",
+        ["chatlog__embed-generic-image"] = "egi",
+        ["chatlog__embed-generic-video"] = "egv",
+        ["chatlog__embed-generic-gifv"] = "egg",
+        ["chatlog__embed-description"] = "ede",
+        ["chatlog__embed-fields"] = "efs",
+        ["chatlog__embed-field"] = "efd",
+        ["chatlog__embed-field--inline"] = "efi",
+        ["chatlog__embed-field-name"] = "efn",
+        ["chatlog__embed-field-value"] = "efv",
+        ["chatlog__embed-image-container"] = "eic",
+        ["chatlog__embed-image-link"] = "eil",
+        ["chatlog__embed-image"] = "eim",
+        ["chatlog__embed-images"] = "eims",
+        ["chatlog__embed-images--single"] = "eimss",
+        ["chatlog__embed-thumbnail-link"] = "etl3",
+        ["chatlog__embed-thumbnail-container"] = "etc",
+        ["chatlog__embed-thumbnail"] = "eth",
+        ["chatlog__embed-footer"] = "efr",
+        ["chatlog__embed-footer-icon"] = "efi",
+        ["chatlog__embed-footer-text"] = "eft",
+        ["chatlog__reactions"] = "ra",
+        ["chatlog__reaction"] = "rc",
+        ["chatlog__reaction-count"] = "rct",
+        ["chatlog__emoji"] = "ej",
+        ["chatlog__emoji--small"] = "ejs",
+        ["chatlog__emoji--large"] = "ejl",
+        ["chatlog__pagination"] = "pg",
+        ["chatlog__pagination-link"] = "pl",
+        ["chatlog__pagination-link--disabled"] = "pld",
+        ["chatlog__pagination-current"] = "pc",
+        ["chatlog__markdown-quote"] = "mq",
+        ["chatlog__markdown-quote-border"] = "mqb",
+        ["chatlog__markdown-quote-content"] = "mqc",
+        ["chatlog__markdown-mention"] = "mn",
+        ["chatlog__markdown-timestamp"] = "mt",
+        ["postamble"] = "po",
+        ["postamble__entry"] = "poe",
+    };
+
+    public string GetClass(string fullClassName)
+    {
+        if (!Request.IsCompact)
+            return fullClassName;
+
+        var parts = fullClassName.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (ClassMap.TryGetValue(parts[i], out var shortName))
+                parts[i] = shortName;
+        }
+        return string.Join(' ', parts);
+    }
+
+    public string MinifyCss(string css)
+    {
+        if (!Request.IsCompact)
+            return css;
+
+        foreach (var (className, mappedName) in ClassMap)
+        {
+            css = System.Text.RegularExpressions.Regex.Replace(
+                css,
+                @"\."
+                    + System.Text.RegularExpressions.Regex.Escape(className)
+                    + @"(?![a-zA-Z0-9_-])",
+                "." + mappedName
+            );
+        }
+
+        // Strip comments
+        css = System.Text.RegularExpressions.Regex.Replace(css, @"/\*[\s\S]*?\*/", "");
+
+        // Remove spaces around symbols: { } : ; ,
+        css = System.Text.RegularExpressions.Regex.Replace(css, @"\s*([{};:,])\s*", "$1");
+
+        // Replace consecutive whitespaces with a single space
+        css = System.Text.RegularExpressions.Regex.Replace(css, @"\s+", " ");
+
+        return css.Trim();
     }
 }

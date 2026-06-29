@@ -130,6 +130,13 @@ public partial class ConvertCommand : ICommand
     )]
     public bool ShouldUseHtmlSharedAssets { get; set; }
 
+    [CommandOption(
+        "compact",
+        'c',
+        Description = "Minify HTML file size by shortening CSS class names and omitting unused metadata."
+    )]
+    public bool IsCompact { get; set; }
+
     public async ValueTask ExecuteAsync(IConsole console)
     {
         var cancellationToken = console.RegisterCancellationHandler();
@@ -150,6 +157,11 @@ public partial class ConvertCommand : ICommand
             throw new CommandException(
                 "Option --html-shared-assets can only be used with HTML formats."
             );
+        }
+
+        if (IsCompact && ExportFormat is not ExportFormat.HtmlDark and not ExportFormat.HtmlLight)
+        {
+            throw new CommandException("Option --compact can only be used with HTML formats.");
         }
 
         // Asset reuse can only be enabled if the download assets option is set
@@ -281,7 +293,8 @@ public partial class ConvertCommand : ICommand
                 IsUtcNormalizationEnabled,
                 // Convert is an offline operation: reference cached assets, but never contact Discord.
                 isOfflineAssetMode: true,
-                shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets
+                shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
+                isCompact: IsCompact
             );
 
         bool TryGetKnownOutputFilePath(string inputFilePath, out string outputFilePath)

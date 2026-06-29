@@ -15,6 +15,16 @@
     public required ExportContext Context { get; init; }
 
     public required IReadOnlyList<Message> Messages { get; init; }
+
+    private string GetClass(string className) => Context.GetClass(className);
+
+    private string TitleAttr(string title) => Context.Request.IsCompact ? "" : $" title=\"{Html.Encode(title)}\"";
+
+    private string TitleAttrDate(DateTimeOffset date, string format = "f") => Context.Request.IsCompact ? "" : $" title=\"{Context.FormatDate(date, format)}\"";
+
+    private string DataMsgIdAttr(DiscordChatExporter.Core.Discord.Snowflake messageId) => Context.Request.IsCompact ? "" : $" data-message-id=\"{messageId}\"";
+
+    private string DataUserIdAttr(DiscordChatExporter.Core.Discord.Snowflake userId) => Context.Request.IsCompact ? "" : $" data-user-id=\"{userId}\"";
 }
 
 @{
@@ -40,7 +50,7 @@
             : $"#{iconId}";
 }
 
-<div class="chatlog__message-group">
+<div class="@GetClass("chatlog__message-group")">
 @foreach (var (i, message) in Messages.Index())
 {
     var isFirst = i == 0;
@@ -51,12 +61,12 @@
         ? message.Author.DisplayName
         : authorMember?.DisplayName ?? message.Author.DisplayName;
 
-    <div id="@HtmlExport.GetMessageElementId(message.Id)" class="chatlog__message-container chatlog__message @(message.IsPinned ? "chatlog__message-container--pinned" : null)" data-message-id="@message.Id">
+    <div id="@HtmlExport.GetMessageElementId(message.Id)" class="@GetClass("chatlog__message-container chatlog__message" + (message.IsPinned ? " chatlog__message-container--pinned" : ""))"@Html.Raw(DataMsgIdAttr(message.Id))>
             @* System notification *@
             @if (message.IsSystemNotification)
             {
-                <div class="chatlog__message-aside">
-                    <svg class="chatlog__system-notification-icon">
+                <div class="@GetClass("chatlog__message-aside")">
+                    <svg class="@GetClass("chatlog__system-notification-icon")">
                         @{
                             var icon = message.Kind switch {
                                 MessageKind.RecipientAdd => "join-icon",
@@ -75,19 +85,19 @@
                     </svg>
                 </div>
 
-                <div class="chatlog__message-primary">
+                <div class="@GetClass("chatlog__message-primary")">
                     @* Author name *@
-                    <span class="chatlog__system-notification-author" style="@(authorColor is not null ? $"color: rgb({authorColor.Value.R}, {authorColor.Value.G}, {authorColor.Value.B})" : null)" title="@message.Author.FullName" data-user-id="@message.Author.Id">@authorDisplayName</span>
+                    <span class="@GetClass("chatlog__system-notification-author")" style="@(authorColor is not null ? $"color: rgb({authorColor.Value.R}, {authorColor.Value.G}, {authorColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.Author.FullName))@Html.Raw(DataUserIdAttr(message.Author.Id))>@authorDisplayName</span>
 
                     @* Space out the content *@
                     <span> </span>
 
                     @* System notification content *@
-                    <span class="chatlog__system-notification-content">
+                    <span class="@GetClass("chatlog__system-notification-content")">
                         @if (message.Kind == MessageKind.RecipientAdd && message.MentionedUsers.Any())
                         {
                             <span>added </span>
-                            <a class="chatlog__system-notification-link" title="@message.MentionedUsers.First().FullName">@message.MentionedUsers.First().DisplayName</a>
+                            <a class="@GetClass("chatlog__system-notification-link")"@Html.Raw(TitleAttr(message.MentionedUsers.First().FullName))>@message.MentionedUsers.First().DisplayName</a>
                             <span> to the group.</span>
                         }
                         else if (message.Kind == MessageKind.RecipientRemove && message.MentionedUsers.Any())
@@ -99,7 +109,7 @@
                             else
                             {
                                 <span>removed </span>
-                                <a class="chatlog__system-notification-link" title="@message.MentionedUsers.First().FullName">@message.MentionedUsers.First().DisplayName</a>
+                                <a class="@GetClass("chatlog__system-notification-link")"@Html.Raw(TitleAttr(message.MentionedUsers.First().FullName))>@message.MentionedUsers.First().DisplayName</a>
                                 <span> from the group.</span>
                             }
                         }
@@ -110,7 +120,7 @@
                         else if (message.Kind == MessageKind.ChannelNameChange)
                         {
                             <span>changed the channel name: </span>
-                            <span class="chatlog__system-notification-link">@message.Content</span>
+                            <span class="@GetClass("chatlog__system-notification-link")">@message.Content</span>
                         }
                         else if (message.Kind == MessageKind.ChannelIconChange)
                         {
@@ -119,7 +129,7 @@
                         else if (message.Kind == MessageKind.ChannelPinnedMessage && message.Reference?.MessageId is not null)
                         {
                             <span>pinned </span>
-                            <a class="chatlog__system-notification-link" href="@HtmlExport.GetMessageFragment(message.Reference.MessageId.Value)">a message</a>
+                            <a class="@GetClass("chatlog__system-notification-link")" href="@HtmlExport.GetMessageFragment(message.Reference.MessageId.Value)">a message</a>
                             <span> to this channel.</span>
                         }
                         else if (message.Kind == MessageKind.ThreadCreated)
@@ -137,37 +147,37 @@
                     </span>
 
                     @* Timestamp *@
-                    <a class="chatlog__system-notification-timestamp" href="@HtmlExport.GetMessageFragment(message.Id)" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
+                    <a class="@GetClass("chatlog__system-notification-timestamp")" href="@HtmlExport.GetMessageFragment(message.Id)"@Html.Raw(TitleAttrDate(message.Timestamp))>@FormatDate(message.Timestamp)</a>
                 </div>
             }
             // Regular message
             else
             {
-                <div class="chatlog__message-aside">
+                <div class="@GetClass("chatlog__message-aside")">
                     @if (isFirst)
                     {
                         // Reply symbol
                         if (message.IsReplyLike)
                         {
-                            <div class="chatlog__reply-symbol"></div>
+                            <div class="@GetClass("chatlog__reply-symbol")"></div>
                         }
 
                         // Avatar
-                        <img class="chatlog__avatar" src="@await ResolveAssetUrlAsync(authorMember?.AvatarUrl ?? message.Author.AvatarUrl)" alt="Avatar" loading="lazy">
+                        <img class="@GetClass("chatlog__avatar")" src="@await ResolveAssetUrlAsync(authorMember?.AvatarUrl ?? message.Author.AvatarUrl)" alt="Avatar" loading="lazy">
                     }
                     else
                     {
-                        <div class="chatlog__short-timestamp" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp, "t")</div>
+                        <div class="@GetClass("chatlog__short-timestamp")"@Html.Raw(TitleAttrDate(message.Timestamp))>@FormatDate(message.Timestamp, "t")</div>
                     }
                 </div>
 
-                <div class="chatlog__message-primary">
+                <div class="@GetClass("chatlog__message-primary")">
                     @if (isFirst)
                     {
                         // Message referenced by the reply
                         if (message.IsReplyLike)
                         {
-                            <div class="chatlog__reply">
+                            <div class="@GetClass("chatlog__reply")">
                                 @if (message.ReferencedMessage is not null)
                                 {
                                     var referencedUserMember = Context.TryGetMember(message.ReferencedMessage.Author.Id);
@@ -176,10 +186,10 @@
                                         ? message.ReferencedMessage.Author.DisplayName
                                         : referencedUserMember?.DisplayName ?? message.ReferencedMessage.Author.DisplayName;
 
-                                    <img class="chatlog__reply-avatar" src="@await ResolveAssetUrlAsync(referencedUserMember?.AvatarUrl ?? message.ReferencedMessage.Author.AvatarUrl)" alt="Avatar" loading="lazy">
-                                    <div class="chatlog__reply-author" style="@(referencedUserColor is not null ? $"color: rgb({referencedUserColor.Value.R}, {referencedUserColor.Value.G}, {referencedUserColor.Value.B})" : null)" title="@message.ReferencedMessage.Author.FullName">@referencedUserDisplayName</div>
-                                    <div class="chatlog__reply-content">
-                                        <span class="chatlog__reply-link" onclick="scrollToMessage(event, '@message.ReferencedMessage.Id')">
+                                    <img class="@GetClass("chatlog__reply-avatar")" src="@await ResolveAssetUrlAsync(referencedUserMember?.AvatarUrl ?? message.ReferencedMessage.Author.AvatarUrl)" alt="Avatar" loading="lazy">
+                                    <div class="@GetClass("chatlog__reply-author")" style="@(referencedUserColor is not null ? $"color: rgb({referencedUserColor.Value.R}, {referencedUserColor.Value.G}, {referencedUserColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.ReferencedMessage.Author.FullName))>@referencedUserDisplayName</div>
+                                    <div class="@GetClass("chatlog__reply-content")">
+                                        <span class="@GetClass("chatlog__reply-link")" onclick="scrollToMessage(event, '@message.ReferencedMessage.Id')">
                                             @if (!string.IsNullOrWhiteSpace(message.ReferencedMessage.Content) && !message.ReferencedMessage.IsContentHidden())
                                             {
                                                 <!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(message.ReferencedMessage.Content))<!--/wmm:ignore-->
@@ -197,7 +207,7 @@
 
                                         @if (message.ReferencedMessage.EditedTimestamp is not null)
                                         {
-                                            <span class="chatlog__reply-edited-timestamp" title="@FormatDate(message.ReferencedMessage.EditedTimestamp.Value, "f")">(edited)</span>
+                                            <span class="@GetClass("chatlog__reply-edited-timestamp")"@Html.Raw(TitleAttrDate(message.ReferencedMessage.EditedTimestamp.Value))>(edited)</span>
                                         }
                                     </div>
                                 }
@@ -209,15 +219,15 @@
                                         ? message.Interaction.User.DisplayName
                                         : interactionUserMember?.DisplayName ?? message.Interaction.User.DisplayName;
 
-                                    <img class="chatlog__reply-avatar" src="@await ResolveAssetUrlAsync(interactionUserMember?.AvatarUrl ?? message.Interaction.User.AvatarUrl)" alt="Avatar" loading="lazy">
-                                    <div class="chatlog__reply-author" style="@(interactionUserColor is not null ? $"color: rgb({interactionUserColor.Value.R}, {interactionUserColor.Value.G}, {interactionUserColor.Value.B})" : null)" title="@message.Interaction.User.FullName">@interactionUserDisplayName</div>
-                                    <div class="chatlog__reply-content">
+                                    <img class="@GetClass("chatlog__reply-avatar")" src="@await ResolveAssetUrlAsync(interactionUserMember?.AvatarUrl ?? message.Interaction.User.AvatarUrl)" alt="Avatar" loading="lazy">
+                                    <div class="@GetClass("chatlog__reply-author")" style="@(interactionUserColor is not null ? $"color: rgb({interactionUserColor.Value.R}, {interactionUserColor.Value.G}, {interactionUserColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.Interaction.User.FullName))>@interactionUserDisplayName</div>
+                                    <div class="@GetClass("chatlog__reply-content")">
                                         used /@message.Interaction.Name
                                     </div>
                                 }
                                 else
                                 {
-                                    <div class="chatlog__reply-unknown">
+                                    <div class="@GetClass("chatlog__reply-unknown")">
                                         Original message was deleted or could not be loaded.
                                     </div>
                                 }
@@ -225,9 +235,9 @@
                         }
 
                         // Header
-                        <div class="chatlog__header">
+                        <div class="@GetClass("chatlog__header")">
                             @* Author name *@
-                            <span class="chatlog__author" style="@(authorColor is not null ? $"color: rgb({authorColor.Value.R}, {authorColor.Value.G}, {authorColor.Value.B})" : null)" title="@message.Author.FullName" data-user-id="@message.Author.Id">@authorDisplayName</span>
+                            <span class="@GetClass("chatlog__author")" style="@(authorColor is not null ? $"color: rgb({authorColor.Value.R}, {authorColor.Value.G}, {authorColor.Value.B})" : null)"@Html.Raw(TitleAttr(message.Author.FullName))@Html.Raw(DataUserIdAttr(message.Author.Id))>@authorDisplayName</span>
 
                             @* Bot tag *@
                             @if (message.Author.IsBot)
@@ -235,23 +245,23 @@
                                 // For cross-posts, the BOT tag is replaced with the SERVER tag
                                 if (message.Flags.HasFlag(MessageFlags.CrossPost))
                                 {
-                                    <span class="chatlog__author-tag">SERVER</span>
+                                    <span class="@GetClass("chatlog__author-tag")">SERVER</span>
                                 }
                                 else
                                 {
-                                    <span class="chatlog__author-tag">BOT</span>
+                                    <span class="@GetClass("chatlog__author-tag")">BOT</span>
                                 }
                             }
 
                             @* Timestamp *@
-                            <a class="chatlog__timestamp" href="@HtmlExport.GetMessageFragment(message.Id)" title="@FormatDate(message.Timestamp, "f")">@FormatDate(message.Timestamp)</a>
+                            <a class="@GetClass("chatlog__timestamp")" href="@HtmlExport.GetMessageFragment(message.Id)"@Html.Raw(TitleAttrDate(message.Timestamp))>@FormatDate(message.Timestamp)</a>
                         </div>
                     }
 
                     @* Content *@
                     @if ((!string.IsNullOrWhiteSpace(message.Content) && !message.IsContentHidden()) || message.EditedTimestamp is not null)
                     {
-                        <div class="chatlog__content chatlog__markdown chatlog__markdown-preserve">
+                        <div class="@GetClass("chatlog__content chatlog__markdown chatlog__markdown-preserve")">
                             @* Text *@
                             @if (!string.IsNullOrWhiteSpace(message.Content) && !message.IsContentHidden())
                             {
@@ -261,7 +271,7 @@
                             @* Edited timestamp *@
                             @if (message.EditedTimestamp is not null)
                             {
-                                <span class="chatlog__edited-timestamp" title="@FormatDate(message.EditedTimestamp.Value, "f")">(edited)</span>
+                                <span class="@GetClass("chatlog__edited-timestamp")"@Html.Raw(TitleAttrDate(message.EditedTimestamp.Value))>(edited)</span>
                             }
                         </div>
                     }
@@ -269,9 +279,9 @@
                     @* Forwarded message *@
                     @if (message is { IsForwarded: true, ForwardedMessage: not null })
                     {
-                        <div class="chatlog__forwarded">
-                            <div class="chatlog__forwarded-header">
-                                <svg class="chatlog__forwarded-icon">
+                        <div class="@GetClass("chatlog__forwarded")">
+                            <div class="@GetClass("chatlog__forwarded-header")">
+                                <svg class="@GetClass("chatlog__forwarded-icon")">
                                     <use href="@IconHref("forward-icon")"></use>
                                 </svg>
                                 <em>Forwarded</em>
@@ -280,7 +290,7 @@
                             @* Forwarded content *@
                             @if (!string.IsNullOrWhiteSpace(message.ForwardedMessage.Content))
                             {
-                                <div class="chatlog__forwarded-content chatlog__markdown chatlog__markdown-preserve">
+                                <div class="@GetClass("chatlog__forwarded-content chatlog__markdown chatlog__markdown-preserve")">
                                     <!--wmm:ignore-->@(await FormatMarkdownAsync(message.ForwardedMessage.Content))<!--/wmm:ignore-->
                                 </div>
                             }
@@ -288,39 +298,39 @@
                             @* Forwarded attachments *@
                             @if (message.ForwardedMessage.Attachments.Any())
                             {
-                                <div class="chatlog__forwarded-attachments">
+                                <div class="@GetClass("chatlog__forwarded-attachments")">
                                     @foreach (var attachment in message.ForwardedMessage.Attachments)
                                     {
                                         @if (attachment.IsImage)
                                         {
                                             <a href="@await ResolveAssetUrlAsync(attachment.Url)">
-                                                <img class="chatlog__forwarded-attachment" src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Image attachment")" title="Image: @attachment.FileName (@attachment.FileSize)" loading="lazy">
+                                                <img class="@GetClass("chatlog__forwarded-attachment")" src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Image attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Image: {attachment.FileName} ({attachment.FileSize})\"") loading="lazy">
                                             </a>
                                         }
                                         else if (attachment.IsVideo)
                                         {
-                                            <video class="chatlog__forwarded-attachment" controls>
-                                                <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Video attachment")" title="Video: @attachment.FileName (@attachment.FileSize)">
+                                            <video class="@GetClass("chatlog__forwarded-attachment")" controls>
+                                                <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Video attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Video: {attachment.FileName} ({attachment.FileSize})\"")>
                                             </video>
                                         }
                                         else if (attachment.IsAudio)
                                         {
-                                            <audio class="chatlog__forwarded-attachment" controls>
-                                                <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Audio attachment")" title="Audio: @attachment.FileName (@attachment.FileSize)">
+                                            <audio class="@GetClass("chatlog__forwarded-attachment")" controls>
+                                                <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Audio attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Audio: {attachment.FileName} ({attachment.FileSize})\"")>
                                             </audio>
                                         }
                                         else
                                         {
-                                            <div class="chatlog__attachment-generic">
-                                                <svg class="chatlog__attachment-generic-icon">
+                                            <div class="@GetClass("chatlog__attachment-generic")">
+                                                <svg class="@GetClass("chatlog__attachment-generic-icon")">
                                                     <use href="@IconHref("attachment-icon")"/>
                                                 </svg>
-                                                <div class="chatlog__attachment-generic-name">
+                                                <div class="@GetClass("chatlog__attachment-generic-name")">
                                                     <a href="@await ResolveAssetUrlAsync(attachment.Url)">
                                                         @attachment.FileName
                                                     </a>
                                                 </div>
-                                                <div class="chatlog__attachment-generic-size">
+                                                <div class="@GetClass("chatlog__attachment-generic-size")">
                                                     @attachment.FileSize
                                                 </div>
                                             </div>
@@ -332,24 +342,24 @@
                             @* Forwarded stickers *@
                             @foreach (var sticker in message.ForwardedMessage.Stickers)
                             {
-                                <div class="chatlog__sticker" title="@sticker.Name">
+                                <div class="@GetClass("chatlog__sticker")"@Html.Raw(TitleAttr(sticker.Name))>
                                     @if (sticker.IsImage)
                                     {
-                                        <img class="chatlog__sticker--media" src="@await ResolveAssetUrlAsync(sticker.SourceUrl)" alt="Sticker">
+                                        <img class="@GetClass("chatlog__sticker--media")" src="@await ResolveAssetUrlAsync(sticker.SourceUrl)" alt="Sticker">
                                     }
                                     else if (sticker.Format == StickerFormat.Lottie)
                                     {
-                                        <div class="chatlog__sticker--media" data-source="@await ResolveAssetUrlAsync(sticker.SourceUrl)"></div>
+                                        <div class="@GetClass("chatlog__sticker--media")" data-source="@await ResolveAssetUrlAsync(sticker.SourceUrl)"></div>
                                     }
                                 </div>
                             }
 
                             @* Forwarded timestamp *@
-                            <div class="chatlog__forwarded-timestamp">
-                                <span title="@FormatDate(message.ForwardedMessage.Timestamp, "f")">Originally sent: @FormatDate(message.ForwardedMessage.Timestamp)</span>
+                            <div class="@GetClass("chatlog__forwarded-timestamp")">
+                                <span @Html.Raw(TitleAttrDate(message.ForwardedMessage.Timestamp))>Originally sent: @FormatDate(message.ForwardedMessage.Timestamp)</span>
                                 @if (message.ForwardedMessage.EditedTimestamp is not null)
                                 {
-                                    <span title="@FormatDate(message.ForwardedMessage.EditedTimestamp.Value, "f")"> (edited)</span>
+                                    <span @Html.Raw(TitleAttrDate(message.ForwardedMessage.EditedTimestamp.Value))> (edited)</span>
                                 }
                             </div>
                         </div>
@@ -358,44 +368,44 @@
                     @* Attachments *@
                     @foreach (var attachment in message.Attachments)
                     {
-                        <div class="chatlog__attachment @(attachment.IsSpoiler ? "chatlog__attachment--hidden" : null)" onclick="@(attachment.IsSpoiler ? "showSpoiler(event, this)" : null)">
+                        <div class="@GetClass("chatlog__attachment" + (attachment.IsSpoiler ? " chatlog__attachment--hidden" : ""))" onclick="@(attachment.IsSpoiler ? "showSpoiler(event, this)" : null)">
                             @* Spoiler caption *@
                             @if (attachment.IsSpoiler)
                             {
-                                <div class="chatlog__attachment-spoiler-caption">SPOILER</div>
+                                <div class="@GetClass("chatlog__attachment-spoiler-caption")">SPOILER</div>
                             }
 
                             @* Attachment preview *@
                             @if (attachment.IsImage)
                             {
                                 <a href="@await ResolveAssetUrlAsync(attachment.Url)">
-                                    <img class="chatlog__attachment-media" src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Image attachment")" title="Image: @attachment.FileName (@attachment.FileSize)" loading="lazy">
+                                    <img class="@GetClass("chatlog__attachment-media")" src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Image attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Image: {attachment.FileName} ({attachment.FileSize})\"") loading="lazy">
                                 </a>
                             }
                             else if (attachment.IsVideo)
                             {
-                                <video class="chatlog__attachment-media" controls>
-                                    <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Video attachment")" title="Video: @attachment.FileName (@attachment.FileSize)">
+                                <video class="@GetClass("chatlog__attachment-media")" controls>
+                                    <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Video attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Video: {attachment.FileName} ({attachment.FileSize})\"")>
                                 </video>
                             }
                             else if (attachment.IsAudio)
                             {
-                                <audio class="chatlog__attachment-media" controls>
-                                    <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Audio attachment")" title="Audio: @attachment.FileName (@attachment.FileSize)">
+                                <audio class="@GetClass("chatlog__attachment-media")" controls>
+                                    <source src="@await ResolveAssetUrlAsync(attachment.Url)" alt="@(attachment.Description ?? "Audio attachment")"@Html.Raw(Context.Request.IsCompact ? "" : $" title=\"Audio: {attachment.FileName} ({attachment.FileSize})\"")>
                                 </audio>
                             }
                             else
                             {
-                                <div class="chatlog__attachment-generic">
-                                    <svg class="chatlog__attachment-generic-icon">
+                                <div class="@GetClass("chatlog__attachment-generic")">
+                                    <svg class="@GetClass("chatlog__attachment-generic-icon")">
                                         <use href="@IconHref("attachment-icon")"/>
                                     </svg>
-                                    <div class="chatlog__attachment-generic-name">
+                                    <div class="@GetClass("chatlog__attachment-generic-name")">
                                         <a href="@await ResolveAssetUrlAsync(attachment.Url)">
                                             @attachment.FileName
                                         </a>
                                     </div>
-                                    <div class="chatlog__attachment-generic-size">
+                                    <div class="@GetClass("chatlog__attachment-generic-size")">
                                         @attachment.FileSize
                                     </div>
                                 </div>
@@ -454,49 +464,49 @@
                         // Spotify embed
                         if (embed.TryGetSpotifyTrack() is { } spotifyTrackEmbed)
                         {
-                            <div class="chatlog__embed">
-                                <div class="chatlog__embed-spotify-container">
-                                    <iframe class="chatlog__embed-spotify" src="@spotifyTrackEmbed.Url" width="400" height="80" allowtransparency="true" allow="encrypted-media"></iframe>
+                            <div class="@GetClass("chatlog__embed")">
+                                <div class="@GetClass("chatlog__embed-spotify-container")">
+                                    <iframe class="@GetClass("chatlog__embed-spotify")" src="@spotifyTrackEmbed.Url" width="400" height="80" allowtransparency="true" allow="encrypted-media"></iframe>
                                 </div>
                             </div>
                         }
                         // YouTube embed
                         else if (embed.TryGetYouTubeVideo() is { } youTubeVideoEmbed)
                         {
-                            <div class="chatlog__embed">
+                            <div class="@GetClass("chatlog__embed")">
                                 @* Color pill *@
                                 @if (embed.Color is not null)
                                 {
-                                    <div class="chatlog__embed-color-pill" style="background-color: rgba(@embed.Color.Value.R, @embed.Color.Value.G, @embed.Color.Value.B, @embed.Color.Value.A)"></div>
+                                    <div class="@GetClass("chatlog__embed-color-pill")" style="background-color: rgba(@embed.Color.Value.R, @embed.Color.Value.G, @embed.Color.Value.B, @embed.Color.Value.A)"></div>
                                 }
                                 else
                                 {
-                                    <div class="chatlog__embed-color-pill chatlog__embed-color-pill--default"></div>
+                                    <div class="@GetClass("chatlog__embed-color-pill chatlog__embed-color-pill--default")"></div>
                                 }
 
-                                <div class="chatlog__embed-content-container">
-                                    <div class="chatlog__embed-content">
-                                        <div class="chatlog__embed-text">
+                                <div class="@GetClass("chatlog__embed-content-container")">
+                                    <div class="@GetClass("chatlog__embed-content")">
+                                        <div class="@GetClass("chatlog__embed-text")">
                                             @* Embed author *@
                                             @if (embed.Author is not null)
                                             {
-                                                <div class="chatlog__embed-author-container">
+                                                <div class="@GetClass("chatlog__embed-author-container")">
                                                     @if (!string.IsNullOrWhiteSpace(embed.Author.IconUrl))
                                                     {
-                                                        <img class="chatlog__embed-author-icon" src="@await ResolveAssetUrlAsync(embed.Author.IconProxyUrl ?? embed.Author.IconUrl)" alt="Author icon" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@embed.Author.IconUrl">
+                                                        <img class="@GetClass("chatlog__embed-author-icon")" src="@await ResolveAssetUrlAsync(embed.Author.IconProxyUrl ?? embed.Author.IconUrl)" alt="Author icon" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@embed.Author.IconUrl">
                                                     }
 
                                                     @if (!string.IsNullOrWhiteSpace(embed.Author.Name))
                                                     {
                                                         if (!string.IsNullOrWhiteSpace(embed.Author.Url))
                                                         {
-                                                            <a class="chatlog__embed-author-link" href="@embed.Author.Url">
-                                                                <div class="chatlog__embed-author">@embed.Author.Name</div>
+                                                            <a class="@GetClass("chatlog__embed-author-link")" href="@embed.Author.Url">
+                                                                <div class="@GetClass("chatlog__embed-author")">@embed.Author.Name</div>
                                                             </a>
                                                         }
                                                         else
                                                         {
-                                                            <div class="chatlog__embed-author">@embed.Author.Name</div>
+                                                            <div class="@GetClass("chatlog__embed-author")">@embed.Author.Name</div>
                                                         }
                                                     }
                                                 </div>
@@ -505,24 +515,24 @@
                                             @* Embed title *@
                                             @if (!string.IsNullOrWhiteSpace(embed.Title))
                                             {
-                                                <div class="chatlog__embed-title">
+                                                <div class="@GetClass("chatlog__embed-title")">
                                                     @if (!string.IsNullOrWhiteSpace(embed.Url))
                                                     {
-                                                        <a class="chatlog__embed-title-link" href="@embed.Url">
-                                                            <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
+                                                        <a class="@GetClass("chatlog__embed-title-link")" href="@embed.Url">
+                                                            <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
                                                         </a>
                                                     }
                                                     else
                                                     {
-                                                        <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
+                                                        <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
                                                     }
                                                 </div>
                                             }
 
                                             @* Video thumbnail *@
-                                            <div class="chatlog__embed-youtube-container">
+                                            <div class="@GetClass("chatlog__embed-youtube-container")">
                                                 <a href="@youTubeVideoEmbed.Url">
-                                                    <img class="chatlog__embed-youtube-thumbnail" src="@await ResolveAssetUrlAsync(embed.Thumbnail?.ProxyUrl ?? embed.Thumbnail?.Url ?? youTubeVideoEmbed.ThumbnailUrl)" alt="YouTube video thumbnail" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@(embed.Thumbnail?.Url ?? youTubeVideoEmbed.ThumbnailUrl)">
+                                                    <img class="@GetClass("chatlog__embed-youtube-thumbnail")" src="@await ResolveAssetUrlAsync(embed.Thumbnail?.ProxyUrl ?? embed.Thumbnail?.Url ?? youTubeVideoEmbed.ThumbnailUrl)" alt="YouTube video thumbnail" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@(embed.Thumbnail?.Url ?? youTubeVideoEmbed.ThumbnailUrl)">
                                                 </a>
                                             </div>
                                         </div>
@@ -541,9 +551,9 @@
                             var embedImageCanonicalUrl =
                                 embed.Image?.Url ?? embed.Thumbnail?.Url ?? embed.Url;
 
-                            <div class="chatlog__embed">
+                            <div class="@GetClass("chatlog__embed")">
                                 <a href="@await ResolveAssetUrlAsync(embedImageUrl)">
-                                    <img class="chatlog__embed-generic-image" src="@await ResolveAssetUrlAsync(embedImageUrl)" alt="Embedded image" loading="lazy" data-canonical-url="@embedImageCanonicalUrl">
+                                    <img class="@GetClass("chatlog__embed-generic-image")" src="@await ResolveAssetUrlAsync(embedImageUrl)" alt="Embedded image" loading="lazy" data-canonical-url="@embedImageCanonicalUrl">
                                 </a>
                             </div>
                         }
@@ -559,8 +569,8 @@
 
                             var embedVideoCanonicalUrl = embed.Video?.Url ?? embed.Url;
 
-                            <div class="chatlog__embed">
-                                <video class="chatlog__embed-generic-video" width="@embed.Video?.Width" height="@embed.Video?.Height" controls data-canonical-url="@embedVideoCanonicalUrl">
+                            <div class="@GetClass("chatlog__embed")">
+                                <video class="@GetClass("chatlog__embed-generic-video")" width="@embed.Video?.Width" height="@embed.Video?.Height" controls data-canonical-url="@embedVideoCanonicalUrl">
                                     <source src="@await ResolveAssetUrlAsync(embedVideoUrl)" alt="Embedded video">
                                 </video>
                             </div>
@@ -574,8 +584,8 @@
 
                             var embedVideoCanonicalUrl = embed.Video?.Url ?? embed.Url;
 
-                            <div class="chatlog__embed">
-                                <video class="chatlog__embed-generic-gifv" width="@embed.Video?.Width" height="@embed.Video?.Height" loop onmouseover="this.play()" onmouseout="this.pause()" data-canonical-url="@embedVideoCanonicalUrl">
+                            <div class="@GetClass("chatlog__embed")">
+                                <video class="@GetClass("chatlog__embed-generic-gifv")" width="@embed.Video?.Width" height="@embed.Video?.Height" loop onmouseover="this.play()" onmouseout="this.pause()" data-canonical-url="@embedVideoCanonicalUrl">
                                     <source src="@await ResolveAssetUrlAsync(embedVideoUrl)" alt="Embedded gifv">
                                 </video>
                             </div>
@@ -583,40 +593,40 @@
                         // Rich embed
                         else
                         {
-                            <div class="chatlog__embed">
+                            <div class="@GetClass("chatlog__embed")">
                                 @* Color pill *@
                                 @if (embed.Color is not null)
                                 {
-                                    <div class="chatlog__embed-color-pill" style="background-color: rgba(@embed.Color.Value.R, @embed.Color.Value.G, @embed.Color.Value.B, @embed.Color.Value.A)"></div>
+                                    <div class="@GetClass("chatlog__embed-color-pill")" style="background-color: rgba(@embed.Color.Value.R, @embed.Color.Value.G, @embed.Color.Value.B, @embed.Color.Value.A)"></div>
                                 }
                                 else
                                 {
-                                    <div class="chatlog__embed-color-pill chatlog__embed-color-pill--default"></div>
+                                    <div class="@GetClass("chatlog__embed-color-pill chatlog__embed-color-pill--default")"></div>
                                 }
 
-                                <div class="chatlog__embed-content-container">
-                                    <div class="chatlog__embed-content">
-                                        <div class="chatlog__embed-text">
+                                <div class="@GetClass("chatlog__embed-content-container")">
+                                    <div class="@GetClass("chatlog__embed-content")">
+                                        <div class="@GetClass("chatlog__embed-text")">
                                             @* Embed author *@
                                             @if (embed.Author is not null)
                                             {
-                                                <div class="chatlog__embed-author-container">
+                                                <div class="@GetClass("chatlog__embed-author-container")">
                                                     @if (!string.IsNullOrWhiteSpace(embed.Author.IconUrl))
                                                     {
-                                                        <img class="chatlog__embed-author-icon" src="@await ResolveAssetUrlAsync(embed.Author.IconProxyUrl ?? embed.Author.IconUrl)" alt="Author icon" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@embed.Author.IconUrl">
+                                                        <img class="@GetClass("chatlog__embed-author-icon")" src="@await ResolveAssetUrlAsync(embed.Author.IconProxyUrl ?? embed.Author.IconUrl)" alt="Author icon" loading="lazy" onerror="this.style.visibility='hidden'" data-canonical-url="@embed.Author.IconUrl">
                                                     }
 
                                                     @if (!string.IsNullOrWhiteSpace(embed.Author.Name))
                                                     {
                                                         if (!string.IsNullOrWhiteSpace(embed.Author.Url))
                                                         {
-                                                            <a class="chatlog__embed-author-link" href="@embed.Author.Url">
-                                                                <div class="chatlog__embed-author">@embed.Author.Name</div>
+                                                            <a class="@GetClass("chatlog__embed-author-link")" href="@embed.Author.Url">
+                                                                <div class="@GetClass("chatlog__embed-author")">@embed.Author.Name</div>
                                                             </a>
                                                         }
                                                         else
                                                         {
-                                                            <div class="chatlog__embed-author">@embed.Author.Name</div>
+                                                            <div class="@GetClass("chatlog__embed-author")">@embed.Author.Name</div>
                                                         }
                                                     }
                                                 </div>
@@ -625,16 +635,16 @@
                                             @* Embed title *@
                                             @if (!string.IsNullOrWhiteSpace(embed.Title))
                                             {
-                                                <div class="chatlog__embed-title">
+                                                <div class="@GetClass("chatlog__embed-title")">
                                                     @if (!string.IsNullOrWhiteSpace(embed.Url))
                                                     {
-                                                        <a class="chatlog__embed-title-link" href="@embed.Url">
-                                                            <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
+                                                        <a class="@GetClass("chatlog__embed-title-link")" href="@embed.Url">
+                                                            <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
                                                         </a>
                                                     }
                                                     else
                                                     {
-                                                        <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
+                                                        <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Title))<!--/wmm:ignore--></div>
                                                     }
                                                 </div>
                                             }
@@ -642,29 +652,29 @@
                                             @* Embed description *@
                                             @if (!string.IsNullOrWhiteSpace(embed.Description))
                                             {
-                                                <div class="chatlog__embed-description">
-                                                    <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Description))<!--/wmm:ignore--></div>
+                                                <div class="@GetClass("chatlog__embed-description")">
+                                                    <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(embed.Description))<!--/wmm:ignore--></div>
                                                 </div>
                                             }
 
                                             @* Embed fields *@
                                             @if (embed.Fields.Any())
                                             {
-                                                <div class="chatlog__embed-fields">
+                                                <div class="@GetClass("chatlog__embed-fields")">
                                                     @foreach (var field in embed.Fields)
                                                     {
-                                                        <div class="chatlog__embed-field @(field.IsInline ? "chatlog__embed-field--inline" : null)">
+                                                        <div class="@GetClass("chatlog__embed-field" + (field.IsInline ? " chatlog__embed-field--inline" : ""))">
                                                             @if (!string.IsNullOrWhiteSpace(field.Name))
                                                             {
-                                                                <div class="chatlog__embed-field-name">
-                                                                    <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(field.Name))<!--/wmm:ignore--></div>
+                                                                <div class="@GetClass("chatlog__embed-field-name")">
+                                                                    <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(field.Name))<!--/wmm:ignore--></div>
                                                                 </div>
                                                             }
 
                                                             @if (!string.IsNullOrWhiteSpace(field.Value))
                                                             {
-                                                                <div class="chatlog__embed-field-value">
-                                                                    <div class="chatlog__markdown chatlog__markdown-preserve"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(field.Value))<!--/wmm:ignore--></div>
+                                                                <div class="@GetClass("chatlog__embed-field-value")">
+                                                                    <div class="@GetClass("chatlog__markdown chatlog__markdown-preserve")"><!--wmm:ignore-->@(await FormatEmbedMarkdownAsync(field.Value))<!--/wmm:ignore--></div>
                                                                 </div>
                                                             }
                                                         </div>
@@ -676,9 +686,9 @@
                                         @* Embed content *@
                                         @if (embed.Thumbnail is not null && !string.IsNullOrWhiteSpace(embed.Thumbnail.Url))
                                         {
-                                            <div class="chatlog__embed-thumbnail-container">
-                                                <a class="chatlog__embed-thumbnail-link" href="@await ResolveAssetUrlAsync(embed.Thumbnail.ProxyUrl ?? embed.Thumbnail.Url)">
-                                                    <img class="chatlog__embed-thumbnail" src="@await ResolveAssetUrlAsync(embed.Thumbnail.ProxyUrl ?? embed.Thumbnail.Url)" alt="Thumbnail" loading="lazy" data-canonical-url="@embed.Thumbnail.Url">
+                                            <div class="@GetClass("chatlog__embed-thumbnail-container")">
+                                                <a class="@GetClass("chatlog__embed-thumbnail-link")" href="@await ResolveAssetUrlAsync(embed.Thumbnail.ProxyUrl ?? embed.Thumbnail.Url)">
+                                                    <img class="@GetClass("chatlog__embed-thumbnail")" src="@await ResolveAssetUrlAsync(embed.Thumbnail.ProxyUrl ?? embed.Thumbnail.Url)" alt="Thumbnail" loading="lazy" data-canonical-url="@embed.Thumbnail.Url">
                                                 </a>
                                             </div>
                                         }
@@ -687,14 +697,14 @@
                                     @* Embed images *@
                                     @if (embed.Images.Any())
                                     {
-                                        <div class="chatlog__embed-images @(embed.Images.Count == 1 ? "chatlog__embed-images--single" : null)">
+                                        <div class="@GetClass("chatlog__embed-images" + (embed.Images.Count == 1 ? " chatlog__embed-images--single" : ""))">
                                             @foreach (var image in embed.Images)
                                             {
                                                 if (!string.IsNullOrWhiteSpace(image.Url))
                                                 {
-                                                    <div class="chatlog__embed-image-container">
-                                                        <a class="chatlog__embed-image-link" href="@await ResolveAssetUrlAsync(image.ProxyUrl ?? image.Url)">
-                                                            <img class="chatlog__embed-image" src="@await ResolveAssetUrlAsync(image.ProxyUrl ?? image.Url)" alt="Image" loading="lazy" data-canonical-url="@image.Url">
+                                                    <div class="@GetClass("chatlog__embed-image-container")">
+                                                        <a class="@GetClass("chatlog__embed-image-link")" href="@await ResolveAssetUrlAsync(image.ProxyUrl ?? image.Url)">
+                                                            <img class="@GetClass("chatlog__embed-image")" src="@await ResolveAssetUrlAsync(image.ProxyUrl ?? image.Url)" alt="Image" loading="lazy" data-canonical-url="@image.Url">
                                                         </a>
                                                     </div>
                                                 }
@@ -705,14 +715,14 @@
                                     @* Embed footer & icon *@
                                     @if (embed.Footer is not null || embed.Timestamp is not null)
                                     {
-                                        <div class="chatlog__embed-footer">
+                                        <div class="@GetClass("chatlog__embed-footer")">
                                             @* Footer icon *@
                                             @if (!string.IsNullOrWhiteSpace(embed.Footer?.IconUrl))
                                             {
-                                                <img class="chatlog__embed-footer-icon" src="@await ResolveAssetUrlAsync(embed.Footer.IconProxyUrl ?? embed.Footer.IconUrl)" alt="Footer icon" loading="lazy" data-canonical-url="@embed.Footer.IconUrl">
+                                                <img class="@GetClass("chatlog__embed-footer-icon")" src="@await ResolveAssetUrlAsync(embed.Footer.IconProxyUrl ?? embed.Footer.IconUrl)" alt="Footer icon" loading="lazy" data-canonical-url="@embed.Footer.IconUrl">
                                             }
 
-                                            <span class="chatlog__embed-footer-text">
+                                            <span class="@GetClass("chatlog__embed-footer-text")">
                                                 @* Footer text *@
                                                 @if (!string.IsNullOrWhiteSpace(embed.Footer?.Text))
                                                 {
@@ -740,14 +750,14 @@
                     @* Stickers *@
                     @foreach (var sticker in message.Stickers)
                     {
-                        <div class="chatlog__sticker" title="@sticker.Name">
+                        <div class="@GetClass("chatlog__sticker")"@Html.Raw(TitleAttr(sticker.Name))>
                             @if (sticker.IsImage)
                             {
-                                <img class="chatlog__sticker--media" src="@await ResolveAssetUrlAsync(sticker.SourceUrl)" alt="Sticker">
+                                <img class="@GetClass("chatlog__sticker--media")" src="@await ResolveAssetUrlAsync(sticker.SourceUrl)" alt="Sticker">
                             }
                             else if (sticker.Format == StickerFormat.Lottie)
                             {
-                                <div class="chatlog__sticker--media" data-source="@await ResolveAssetUrlAsync(sticker.SourceUrl)"></div>
+                                <div class="@GetClass("chatlog__sticker--media")" data-source="@await ResolveAssetUrlAsync(sticker.SourceUrl)"></div>
                             }
                         </div>
                     }
@@ -755,12 +765,12 @@
                     @* Message reactions *@
                     @if (message.Reactions.Any())
                     {
-                        <div class="chatlog__reactions">
+                        <div class="@GetClass("chatlog__reactions")">
                             @foreach (var reaction in message.Reactions)
                             {
-                                <div class="chatlog__reaction" title="@reaction.Emoji.Code">
-                                    <img class="chatlog__emoji chatlog__emoji--small" alt="@reaction.Emoji.Name" src="@await ResolveAssetUrlAsync(reaction.Emoji.ImageUrl)" loading="lazy">
-                                    <span class="chatlog__reaction-count">@reaction.Count</span>
+                                <div class="@GetClass("chatlog__reaction")"@Html.Raw(TitleAttr(reaction.Emoji.Code))>
+                                    <img class="@GetClass("chatlog__emoji chatlog__emoji--small")" alt="@reaction.Emoji.Name" src="@await ResolveAssetUrlAsync(reaction.Emoji.ImageUrl)" loading="lazy">
+                                    <span class="@GetClass("chatlog__reaction-count")">@reaction.Count</span>
                                 </div>
                             }
                         </div>

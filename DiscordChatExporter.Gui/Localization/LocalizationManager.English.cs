@@ -116,6 +116,9 @@ public partial class LocalizationManager
             [nameof(FormatMarkdownLabel)] = "Format markdown",
             [nameof(FormatMarkdownTooltip)] =
                 "Process markdown, mentions, and other special tokens",
+            [nameof(CompactModeLabel)] = "Compact mode",
+            [nameof(CompactModeTooltip)] =
+                "Minify the exported file size by using shortened CSS class names and omitting optional attributes",
             [nameof(DownloadAssetsLabel)] = "Download assets",
             [nameof(DownloadAssetsTooltip)] =
                 "Download assets referenced by the export (user avatars, attached files, embedded images, etc.)",

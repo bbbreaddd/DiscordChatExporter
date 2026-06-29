@@ -36,7 +36,10 @@ public partial class ExportSetupViewModel(
     public partial string? OutputPath { get; set; }
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsFormatHtml))]
     public partial ExportFormat SelectedFormat { get; set; }
+
+    public bool IsFormatHtml => SelectedFormat is ExportFormat.HtmlDark or ExportFormat.HtmlLight;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAfterDateSet))]
@@ -73,6 +76,9 @@ public partial class ExportSetupViewModel(
 
     [ObservableProperty]
     public partial bool ShouldReuseAssets { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsCompact { get; set; }
 
     [ObservableProperty]
     public partial string? AssetsDirPath { get; set; }
@@ -112,6 +118,7 @@ public partial class ExportSetupViewModel(
         ShouldFormatMarkdown = settingsService.LastShouldFormatMarkdown;
         ShouldDownloadAssets = settingsService.LastShouldDownloadAssets;
         ShouldReuseAssets = settingsService.LastShouldReuseAssets;
+        IsCompact = settingsService.LastIsCompact;
         AssetsDirPath = settingsService.LastAssetsDirPath;
 
         // Show the "advanced options" section by default if any
@@ -123,6 +130,7 @@ public partial class ExportSetupViewModel(
             || !string.IsNullOrWhiteSpace(MessageFilterValue)
             || ShouldDownloadAssets
             || ShouldReuseAssets
+            || IsCompact
             || !string.IsNullOrWhiteSpace(AssetsDirPath)
             || IsReverseMessageOrder;
 
@@ -194,6 +202,7 @@ public partial class ExportSetupViewModel(
         settingsService.LastShouldFormatMarkdown = ShouldFormatMarkdown;
         settingsService.LastShouldDownloadAssets = ShouldDownloadAssets;
         settingsService.LastShouldReuseAssets = ShouldReuseAssets;
+        settingsService.LastIsCompact = IsCompact;
         settingsService.LastAssetsDirPath = AssetsDirPath;
 
         Close(true);

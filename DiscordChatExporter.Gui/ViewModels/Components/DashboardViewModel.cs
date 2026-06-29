@@ -298,7 +298,8 @@ public partial class DashboardViewModel : ViewModelBase
                             dialog.ShouldReuseAssets,
                             _settingsService.Locale,
                             _settingsService.IsUtcNormalizationEnabled,
-                            shouldUseHtmlSharedAssets: false
+                            shouldUseHtmlSharedAssets: false,
+                            isCompact: dialog.IsCompact
                         );
 
                         await exporter.ExportChannelAsync(

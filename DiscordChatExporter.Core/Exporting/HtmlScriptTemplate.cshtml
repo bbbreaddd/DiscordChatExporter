@@ -1,6 +1,11 @@
 @using RazorBlade
+@using DiscordChatExporter.Core.Exporting
 
 @inherits RazorBlade.HtmlTemplate
+
+@functions {
+    public required ExportContext Context { get; init; }
+}
 
 function scrollToMessage(event, id) {
     const element = document.getElementById('m-' + id);
@@ -8,7 +13,7 @@ function scrollToMessage(event, id) {
         return;
 
     event.preventDefault();
-    element.classList.add('chatlog__message-container--highlighted');
+    element.classList.add('@Context.GetClass("chatlog__message-container--highlighted")');
 
     window.scrollTo({
         top: element.getBoundingClientRect().top - document.body.getBoundingClientRect().top - (window.innerHeight / 2),
@@ -16,7 +21,7 @@ function scrollToMessage(event, id) {
     });
 
     window.setTimeout(
-        () => element.classList.remove('chatlog__message-container--highlighted'),
+        () => element.classList.remove('@Context.GetClass("chatlog__message-container--highlighted")'),
         2000
     );
 }
@@ -25,24 +30,24 @@ function showSpoiler(event, element) {
     if (!element)
         return;
 
-    if (element.classList.contains('chatlog__attachment--hidden')) {
+    if (element.classList.contains('@Context.GetClass("chatlog__attachment--hidden")')) {
         event.preventDefault();
-        element.classList.remove('chatlog__attachment--hidden');
+        element.classList.remove('@Context.GetClass("chatlog__attachment--hidden")');
     }
 
-    if (element.classList.contains('chatlog__markdown-spoiler--hidden')) {
+    if (element.classList.contains('@Context.GetClass("chatlog__markdown-spoiler--hidden")')) {
         event.preventDefault();
-        element.classList.remove('chatlog__markdown-spoiler--hidden');
+        element.classList.remove('@Context.GetClass("chatlog__markdown-spoiler--hidden")');
     }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     if (window.hljs) {
-        document.querySelectorAll('.chatlog__markdown-pre--multiline').forEach(e => hljs.highlightBlock(e));
+        document.querySelectorAll('.@Context.GetClass("chatlog__markdown-pre--multiline")').forEach(e => hljs.highlightBlock(e));
     }
 
     if (window.lottie) {
-        document.querySelectorAll('.chatlog__sticker--media[data-source]').forEach(e => {
+        document.querySelectorAll('.@(Context.GetClass("chatlog__sticker--media"))[data-source]').forEach(e => {
             const anim = lottie.loadAnimation({
                 container: e,
                 renderer: 'svg',

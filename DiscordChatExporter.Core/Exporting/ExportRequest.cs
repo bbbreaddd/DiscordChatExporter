@@ -67,6 +67,8 @@ public partial class ExportRequest
 
     public bool ShouldUseHtmlSharedAssets { get; }
 
+    public bool IsCompact { get; }
+
     public ExportRequest(
         Guild guild,
         Channel channel,
@@ -86,7 +88,8 @@ public partial class ExportRequest
         bool isIncremental = false,
         bool shouldCacheAssetsOnly = false,
         bool isOfflineAssetMode = false,
-        bool shouldUseHtmlSharedAssets = false
+        bool shouldUseHtmlSharedAssets = false,
+        bool isCompact = false
     )
     {
         Guild = guild;
@@ -106,6 +109,7 @@ public partial class ExportRequest
         IsUtcNormalizationEnabled = isUtcNormalizationEnabled;
         IsIncremental = isIncremental;
         ShouldUseHtmlSharedAssets = shouldUseHtmlSharedAssets;
+        IsCompact = isCompact;
 
         BaseOutputDirPath =
             Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)

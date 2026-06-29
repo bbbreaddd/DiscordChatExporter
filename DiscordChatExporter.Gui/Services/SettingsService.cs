@@ -73,6 +73,9 @@ public partial class SettingsService()
     public partial bool LastShouldReuseAssets { get; set; }
 
     [ObservableProperty]
+    public partial bool LastIsCompact { get; set; }
+
+    [ObservableProperty]
     public partial string? LastAssetsDirPath { get; set; }
 
     public override void Save()

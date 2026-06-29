@@ -154,6 +154,12 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool ShouldUseHtmlSharedAssets { get; set; } = false;
 
     [CommandOption(
+        "compact",
+        Description = "Minify HTML file size by shortening CSS class names and omitting unused metadata."
+    )]
+    public bool IsCompact { get; set; } = false;
+
+    [CommandOption(
         "incremental",
         Description = "Append new messages to an existing JSON export file instead of overwriting it."
     )]
@@ -351,7 +357,8 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                         IsUtcNormalizationEnabled,
                                         IsIncremental,
                                         ShouldCacheAssetsOnly,
-                                        shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets
+                                        shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
+                                        isCompact: IsCompact
                                     );
 
                                     await Exporter.ExportChannelAsync(

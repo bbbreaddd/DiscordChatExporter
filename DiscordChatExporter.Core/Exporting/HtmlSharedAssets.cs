@@ -30,12 +30,14 @@ internal static class HtmlSharedAssets
         var styleFilePath = Path.Combine(dirPath, GetStyleFileName(themeName));
         if (!File.Exists(styleFilePath))
         {
-            var content = await new HtmlStyleTemplate
-            {
-                Context = context,
-                ThemeName = themeName,
-                ResolveFontUrls = false,
-            }.RenderAsync(cancellationToken);
+            var content = context.MinifyCss(
+                await new HtmlStyleTemplate
+                {
+                    Context = context,
+                    ThemeName = themeName,
+                    ResolveFontUrls = false,
+                }.RenderAsync(cancellationToken)
+            );
 
             await File.WriteAllTextAsync(styleFilePath, content, cancellationToken);
         }
@@ -43,7 +45,9 @@ internal static class HtmlSharedAssets
         var scriptsFilePath = Path.Combine(dirPath, ScriptsFileName);
         if (!File.Exists(scriptsFilePath))
         {
-            var content = await new HtmlScriptTemplate().RenderAsync(cancellationToken);
+            var content = await new HtmlScriptTemplate { Context = context }.RenderAsync(
+                cancellationToken
+            );
             await File.WriteAllTextAsync(scriptsFilePath, content, cancellationToken);
         }
 
