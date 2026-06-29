@@ -1,6 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using DiscordChatExporter.Core.Discord;
+using DiscordChatExporter.Core.Discord.Data;
 using Gress;
 
 namespace DiscordChatExporter.Core.Exporting.Converting;
@@ -63,6 +67,72 @@ public class ChatConverter
             }
 
             progress?.Report(Percentage.FromFraction((fileIndex + 1.0) / chatProviders.Count));
+        }
+    }
+
+    public async ValueTask ConvertStreamingAsync(
+        IReadOnlyList<string> groupFilePaths,
+        ExportRequest request,
+        Func<string, Func<string, string>?> getRebaseLocalAssetPath,
+        IProgress<Percentage>? progress = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (groupFilePaths.Count <= 0)
+            return;
+
+        // Pass 1: Collect members and roles from all files in the group sequentially, and count total messages
+        var members = new Dictionary<Snowflake, Member>();
+        var roles = new Dictionary<Snowflake, Role>();
+        var totalMessages = 0;
+        var filesMetadata = new List<(string FilePath, int MessageCount)>();
+
+        foreach (var filePath in groupFilePaths)
+        {
+            var rebaseLocalAssetPath = getRebaseLocalAssetPath(filePath);
+
+            var (fileMembers, fileRoles, fileCount) =
+                await ExportedChatParser.CollectMetadataAndCountStreamingAsync(
+                    filePath,
+                    rebaseLocalAssetPath,
+                    cancellationToken
+                );
+
+            foreach (var (k, v) in fileMembers)
+                members[k] = v;
+            foreach (var (k, v) in fileRoles)
+                roles[k] = v;
+
+            totalMessages += fileCount;
+            filesMetadata.Add((filePath, fileCount));
+        }
+
+        // Pass 2: Stream messages one-by-one and write them directly to the exporter
+        var context = new ExportContext(null, request, members, roles);
+        await using var messageExporter = new MessageExporter(context);
+
+        var messagesProcessed = 0;
+        foreach (var (filePath, fileCount) in filesMetadata)
+        {
+            var rebaseLocalAssetPath = getRebaseLocalAssetPath(filePath);
+
+            await foreach (
+                var messageJson in ExportedChatParser.StreamMessagesAsync(
+                    filePath,
+                    cancellationToken
+                )
+            )
+            {
+                var message = ExportedMessageParser.ParseMessage(messageJson, rebaseLocalAssetPath);
+
+                if (request.MessageFilter.IsMatch(message))
+                    await messageExporter.ExportMessageAsync(message, cancellationToken);
+
+                messagesProcessed++;
+                progress?.Report(
+                    Percentage.FromFraction((double)messagesProcessed / Math.Max(1, totalMessages))
+                );
+            }
         }
     }
 }

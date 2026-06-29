@@ -376,50 +376,32 @@ public partial class ConvertCommand : ICommand
                 return false;
             }
 
-            await using var firstStream = File.OpenRead(firstFilePath);
-            using var firstDoc = await JsonDocument.ParseAsync(
-                firstStream,
-                cancellationToken: innerCancellationToken
-            );
-
-            Func<string, string>? rebaseLocalAssetPath = null;
-            if (ShouldDownloadAssets)
+            Func<string, Func<string, string>?> getRebaseLocalAssetPath = filePath =>
             {
-                rebaseLocalAssetPath = relativeLocalPath =>
+                Func<string, string>? rebaseLocalAssetPath = null;
+                if (ShouldDownloadAssets)
                 {
-                    var inputDirPath =
-                        Path.GetDirectoryName(firstFilePath) ?? Directory.GetCurrentDirectory();
-                    var absolutePath = Path.GetFullPath(
-                        Path.Combine(inputDirPath, relativeLocalPath)
-                    );
-                    var rebasedPath = Path.GetRelativePath(request.OutputDirPath, absolutePath);
+                    rebaseLocalAssetPath = relativeLocalPath =>
+                    {
+                        var inputDirPath =
+                            Path.GetDirectoryName(filePath) ?? Directory.GetCurrentDirectory();
+                        var absolutePath = Path.GetFullPath(
+                            Path.Combine(inputDirPath, relativeLocalPath)
+                        );
+                        var rebasedPath = Path.GetRelativePath(request.OutputDirPath, absolutePath);
 
-                    return request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight
-                        ? Url.EncodeFilePath(rebasedPath)
-                        : rebasedPath;
-                };
-            }
+                        return request.Format is ExportFormat.HtmlDark or ExportFormat.HtmlLight
+                            ? Url.EncodeFilePath(rebasedPath)
+                            : rebasedPath;
+                    };
+                }
+                return rebaseLocalAssetPath;
+            };
 
-            var firstChat = ExportedChatParser.Parse(firstDoc.RootElement, rebaseLocalAssetPath);
-
-            var chatProviders = new Func<CancellationToken, ValueTask<ExportedChat>>[
-                groupFilePaths.Count
-            ];
-            chatProviders[0] = ct => ValueTask.FromResult(firstChat);
-            for (var i = 1; i < groupFilePaths.Count; i++)
-            {
-                var filePath = groupFilePaths[i];
-                chatProviders[i] = async ct =>
-                {
-                    await using var stream = File.OpenRead(filePath);
-                    using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-                    return ExportedChatParser.Parse(doc.RootElement, rebaseLocalAssetPath);
-                };
-            }
-
-            await new ChatConverter().ConvertAsync(
-                chatProviders,
+            await new ChatConverter().ConvertStreamingAsync(
+                groupFilePaths,
                 request,
+                getRebaseLocalAssetPath,
                 progress,
                 innerCancellationToken
             );

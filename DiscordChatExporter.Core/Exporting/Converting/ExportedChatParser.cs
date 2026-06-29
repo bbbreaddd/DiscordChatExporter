@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using JsonExtensions.Reading;
@@ -316,5 +320,175 @@ public static class ExportedChatParser
             CollectMembersAndRoles(messageJson, members, roles, rebaseLocalAssetPath);
 
         return new ExportedChat(guild, channel, after, before, messages, members, roles);
+    }
+
+    private struct ParserState
+    {
+        public bool IsFinalBlock;
+        public JsonReaderState ReaderState;
+        public bool ArrayStarted;
+    }
+
+    private static int ParseMessagesFromBuffer(
+        ReadOnlySpan<byte> buffer,
+        ref ParserState state,
+        List<JsonElement> output,
+        out bool needMoreData,
+        out bool endOfArray
+    )
+    {
+        needMoreData = false;
+        endOfArray = false;
+
+        var reader = new Utf8JsonReader(buffer, state.IsFinalBlock, state.ReaderState);
+
+        if (!state.ArrayStarted)
+        {
+            if (!reader.Read())
+            {
+                needMoreData = true;
+                return 0;
+            }
+
+            if (reader.TokenType != JsonTokenType.StartArray)
+                throw new InvalidDataException("Expected start of messages array.");
+
+            state.ArrayStarted = true;
+        }
+
+        while (true)
+        {
+            var elementReader = reader;
+            if (!elementReader.Read())
+            {
+                needMoreData = true;
+                break;
+            }
+
+            if (elementReader.TokenType == JsonTokenType.EndArray)
+            {
+                endOfArray = true;
+                reader = elementReader;
+                break;
+            }
+
+            if (elementReader.TokenType == JsonTokenType.StartObject)
+            {
+                try
+                {
+                    using var doc = JsonDocument.ParseValue(ref elementReader);
+                    output.Add(doc.RootElement.Clone());
+                    reader = elementReader;
+                }
+                catch (JsonException)
+                {
+                    needMoreData = true;
+                    break;
+                }
+            }
+            else
+            {
+                reader = elementReader;
+            }
+        }
+
+        state.ReaderState = reader.CurrentState;
+        return (int)reader.BytesConsumed;
+    }
+
+    public static async IAsyncEnumerable<JsonElement> StreamMessagesAsync(
+        string filePath,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        var openOffset = IncrementalJsonAppender.FindMessagesArrayOpenOffset(filePath);
+
+        await using var stream = File.OpenRead(filePath);
+        stream.Seek(openOffset, SeekOrigin.Begin);
+
+        var buffer = new byte[81920]; // 80KB buffer
+        var bufferOffset = 0;
+        var state = new ParserState
+        {
+            IsFinalBlock = false,
+            ReaderState = default,
+            ArrayStarted = false,
+        };
+
+        var outputList = new List<JsonElement>();
+
+        while (true)
+        {
+            var consumed = ParseMessagesFromBuffer(
+                buffer.AsSpan(0, bufferOffset),
+                ref state,
+                outputList,
+                out var needMoreData,
+                out var endOfArray
+            );
+
+            foreach (var element in outputList)
+            {
+                yield return element;
+            }
+            outputList.Clear();
+
+            if (consumed > 0)
+            {
+                buffer.AsSpan(consumed, bufferOffset - consumed).CopyTo(buffer);
+                bufferOffset -= consumed;
+            }
+
+            if (endOfArray)
+                yield break;
+
+            if (needMoreData)
+            {
+                if (bufferOffset == buffer.Length)
+                {
+                    var newBuffer = new byte[buffer.Length * 2];
+                    buffer.AsSpan(0, bufferOffset).CopyTo(newBuffer);
+                    buffer = newBuffer;
+                }
+
+                var bytesRead = await stream.ReadAsync(
+                    buffer.AsMemory(bufferOffset),
+                    cancellationToken
+                );
+                if (bytesRead == 0)
+                {
+                    state.IsFinalBlock = true;
+                    if (bufferOffset == 0)
+                        yield break;
+                }
+                else
+                {
+                    bufferOffset += bytesRead;
+                }
+            }
+        }
+    }
+
+    public static async ValueTask<(
+        Dictionary<Snowflake, Member> Members,
+        Dictionary<Snowflake, Role> Roles,
+        int MessageCount
+    )> CollectMetadataAndCountStreamingAsync(
+        string filePath,
+        Func<string, string>? rebaseLocalAssetPath = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var members = new Dictionary<Snowflake, Member>();
+        var roles = new Dictionary<Snowflake, Role>();
+        var messageCount = 0;
+
+        await foreach (var messageJson in StreamMessagesAsync(filePath, cancellationToken))
+        {
+            CollectMembersAndRoles(messageJson, members, roles, rebaseLocalAssetPath);
+            messageCount++;
+        }
+
+        return (members, roles, messageCount);
     }
 }
