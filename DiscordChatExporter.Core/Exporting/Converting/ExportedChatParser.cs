@@ -344,7 +344,15 @@ public static class ExportedChatParser
 
         if (!state.ArrayStarted)
         {
-            if (!reader.Read())
+            try
+            {
+                if (!reader.Read())
+                {
+                    needMoreData = true;
+                    return 0;
+                }
+            }
+            catch (JsonException)
             {
                 needMoreData = true;
                 return 0;
@@ -359,7 +367,18 @@ public static class ExportedChatParser
         while (true)
         {
             var elementReader = reader;
-            if (!elementReader.Read())
+            bool hasNext;
+            try
+            {
+                hasNext = elementReader.Read();
+            }
+            catch (JsonException)
+            {
+                needMoreData = true;
+                break;
+            }
+
+            if (!hasNext)
             {
                 needMoreData = true;
                 break;
@@ -444,6 +463,8 @@ public static class ExportedChatParser
 
             if (needMoreData)
             {
+                if (state.IsFinalBlock)
+                    yield break;
                 if (bufferOffset == buffer.Length)
                 {
                     var newBuffer = new byte[buffer.Length * 2];

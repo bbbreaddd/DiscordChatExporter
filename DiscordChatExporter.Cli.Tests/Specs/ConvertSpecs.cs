@@ -496,4 +496,78 @@ public class ConvertSpecs
 
         await act.Should().ThrowAsync<CommandException>();
     }
+
+    [Fact(Timeout = 5000)]
+    public async Task I_can_convert_a_truncated_JSON_export_without_hanging()
+    {
+        // Arrange
+        using var inputFile = TempFile.Create();
+        using var outputFile = TempFile.Create();
+
+        // Write an incomplete/truncated JSON file
+        await File.WriteAllTextAsync(
+            inputFile.Path,
+            """
+            {
+              "guild": {
+                "id": "123456789012345678",
+                "name": "Test Guild",
+                "iconUrl": "https://cdn.discordapp.com/embed/avatars/0.png"
+              },
+              "channel": {
+                "id": "956006107564879875",
+                "name": "general",
+                "type": "GuildTextChat",
+                "topic": null
+              },
+              "dateRange": {
+                "after": null,
+                "before": null
+              },
+              "messages": [
+                {
+                  "id": "1234567890",
+                  "type": "Default",
+                  "timestamp": "2026-06-29T00:00:00Z",
+                  "timestampEdited": null,
+                  "callEndedTimestamp": null,
+                  "isPinned": false,
+                  "content": "Complete message before truncation",
+                  "author": {
+                    "id": "111111",
+                    "name": "Author",
+                    "discriminator": "0000",
+                    "nickname": "Author Nick",
+                    "color": null,
+                    "isBot": false,
+                    "avatarUrl": "https://cdn.discordapp.com/embed/avatars/0.png"
+                  },
+                  "attachments": [],
+                  "embeds": [],
+                  "stickers": [],
+                  "reactions": [],
+                  "mentions": []
+                },
+                {
+                  "id": "1234567891",
+                  "type": "Default",
+                  "content": "Truncated message...
+            """
+        );
+
+        // Act
+        await new ConvertCommand
+        {
+            InputPaths = [inputFile.Path],
+            OutputPath = outputFile.Path,
+            ExportFormat = ExportFormat.PlainText,
+            Locale = "en-US",
+            IsUtcNormalizationEnabled = true,
+        }.ExecuteAsync(new FakeConsole());
+
+        // Assert
+        var content = await File.ReadAllTextAsync(outputFile.Path);
+        content.Should().Contain("Complete message before truncation");
+        content.Should().NotContain("Truncated message");
+    }
 }
