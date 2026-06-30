@@ -39,7 +39,8 @@ public class ChannelExporterHeaderSpecs
             null,
             null,
             false,
-            null
+            null,
+            []
         );
 
         return new Channel(
@@ -52,7 +53,8 @@ public class ChannelExporterHeaderSpecs
             null,
             "Some topic",
             false,
-            Snowflake.Parse("400")
+            Snowflake.Parse("400"),
+            []
         );
     }
 

@@ -85,7 +85,8 @@ public static class ExportedChatParser
                 null,
                 null,
                 false,
-                null
+                null,
+                []
             )
             : null;
 
@@ -100,12 +101,13 @@ public static class ExportedChatParser
                 null,
                 null,
                 false,
-                null
+                null,
+                []
             )
             : null;
 
         // LastMessageId isn't part of the export schema
-        return new Channel(id, kind, guildId, parent, name, null, iconUrl, topic, false, null);
+        return new Channel(id, kind, guildId, parent, name, null, iconUrl, topic, false, null, []);
     }
 
     // Collects member/role info embedded in a user object from the export schema. Entries

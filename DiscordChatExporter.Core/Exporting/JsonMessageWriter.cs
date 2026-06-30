@@ -438,6 +438,18 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
             );
         }
 
+        _writer.WriteStartArray("permissionOverwrites");
+        foreach (var overwrite in Context.Request.Channel.PermissionOverwrites)
+        {
+            _writer.WriteStartObject();
+            _writer.WriteString("id", overwrite.Id.ToString());
+            _writer.WriteString("type", overwrite.Kind.ToString());
+            _writer.WriteString("allow", overwrite.Allow.ToString());
+            _writer.WriteString("deny", overwrite.Deny.ToString());
+            _writer.WriteEndObject();
+        }
+        _writer.WriteEndArray();
+
         _writer.WriteEndObject();
 
         // Date range

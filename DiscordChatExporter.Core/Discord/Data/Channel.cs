@@ -18,7 +18,8 @@ public partial record Channel(
     string? IconUrl,
     string? Topic,
     bool IsArchived,
-    Snowflake? LastMessageId
+    Snowflake? LastMessageId,
+    IReadOnlyList<PermissionOverwrite> PermissionOverwrites
 ) : IHasId
 {
     public bool IsDirect { get; } =
@@ -104,6 +105,13 @@ public partial record Channel
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(Snowflake.Parse);
 
+        var permissionOverwrites =
+            json.GetPropertyOrNull("permission_overwrites")
+                ?.EnumerateArrayOrNull()
+                ?.Select(PermissionOverwrite.Parse)
+                .ToArray()
+            ?? [];
+
         return new Channel(
             id,
             kind,
@@ -114,7 +122,8 @@ public partial record Channel
             iconUrl,
             topic,
             isArchived,
-            lastMessageId
+            lastMessageId,
+            permissionOverwrites
         );
     }
 }

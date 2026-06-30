@@ -26,7 +26,8 @@ public class CompactModeSpecs
             null,
             "Some topic",
             false,
-            Snowflake.Parse("400")
+            Snowflake.Parse("400"),
+            []
         );
     }
 
