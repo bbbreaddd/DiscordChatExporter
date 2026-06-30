@@ -88,6 +88,38 @@ public static class MediaInspector
         }
     }
 
+    /// <summary>
+    /// Streaming overload: iterates <paramref name="messages"/> without loading them all into
+    /// memory first, collecting referenced media URLs as it goes. Suitable for very large exports
+    /// where loading the full <see cref="ExportedChat"/> would exhaust available memory.
+    /// </summary>
+    public static async ValueTask<MediaInspectionResult> InspectAsync(
+        IAsyncEnumerable<Message> messages,
+        string assetsDirPath,
+        bool download,
+        DiscordClient? discord = null,
+        int downloadParallelism = 1,
+        bool retryFailed = false,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var urls = new HashSet<string>(StringComparer.Ordinal);
+        await foreach (var message in messages.WithCancellation(cancellationToken))
+        {
+            foreach (var url in GetMediaUrls(message))
+                urls.Add(url);
+        }
+        return await InspectUrlsAsync(
+            urls,
+            assetsDirPath,
+            download,
+            discord,
+            downloadParallelism,
+            retryFailed,
+            cancellationToken
+        );
+    }
+
     public static async ValueTask<MediaInspectionResult> InspectAsync(
         ExportedChat chat,
         string assetsDirPath,
@@ -98,10 +130,28 @@ public static class MediaInspector
         CancellationToken cancellationToken = default
     )
     {
-        // Collapse duplicate references (the same asset is often posted many times) so each
-        // distinct asset is checked -- and downloaded -- at most once.
         var urls = chat.Messages.SelectMany(GetMediaUrls).ToHashSet(StringComparer.Ordinal);
+        return await InspectUrlsAsync(
+            urls,
+            assetsDirPath,
+            download,
+            discord,
+            downloadParallelism,
+            retryFailed,
+            cancellationToken
+        );
+    }
 
+    private static async ValueTask<MediaInspectionResult> InspectUrlsAsync(
+        IReadOnlySet<string> urls,
+        string assetsDirPath,
+        bool download,
+        DiscordClient? discord,
+        int downloadParallelism,
+        bool retryFailed,
+        CancellationToken cancellationToken
+    )
+    {
         var missingUrls = urls.Where(url => !IsCached(assetsDirPath, url)).ToList();
 
         // URLs a previous run already gave up on. Unless the caller forces a retry, these are

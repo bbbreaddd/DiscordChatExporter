@@ -45,26 +45,76 @@ internal static class CrashRecovery
             if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
                 return;
 
-            // 1. Delete regenerable scratch files left by previous runs:
-            //    - Streaming-append temps: ".new.tmp", ".new.tmp.tmp", ".new [part N].tmp",
-            //      ".merged.tmp" — always regenerable from the real partition + manifest.
-            //    - HTML pagination post-processing temps: ".post.tmp" — regenerable by
-            //      re-converting. On SIGKILL the catch-block cleanup in ReplacePlaceholdersAsync
-            //      never runs, leaving these behind indefinitely.
-            var newPrefix = outputFilePath + ".new";
+            // The .new.tmp path is what the streaming-append path writes to during a fetch.
+            // After a successful fetch, .new.tmp is a complete, valid JSON export file.
+            // After a failed merge (e.g., disk full), .new.tmp is intentionally preserved so
+            // the next run can complete the merge rather than re-fetching from Discord.
+            var appendTempPath = outputFilePath + ".new.tmp";
+
+            // 1. Delete only the non-recoverable scratch files:
+            //    - ".new.tmp.tmp": crash mid-write of the first fetch partition (incomplete write
+            //      of appendTempPath itself — distinct from appendTempPath which is finalized)
+            //    - ".new [part N].tmp.tmp": crash mid-write of an overflow fetch partition
+            //    - ".merged.tmp": partial merge output (always regenerable from the real partition
+            //      + appendTempPath, so safe to delete)
+            //    - ".post.tmp": HTML pagination post-processing temp (regenerable by re-converting)
+            //
+            // DO NOT delete ".new.tmp" or ".new [part N].tmp" here — those are complete, valid
+            // fetch partitions (the message exporter finalized them before the crash or disk-full
+            // happened). Step 2 below tries to complete the merge with them.
+            var appendTempWritePath = appendTempPath + ".tmp"; // the mid-write temp = ".new.tmp.tmp"
             var mergedPrefix = outputFilePath + ".merged";
             var postPrefix = outputFilePath + ".post";
+            var overflowPartPrefix = outputFilePath + ".new [part ";
+
             foreach (var path in Directory.EnumerateFiles(dirPath))
             {
                 if (
-                    path.StartsWith(newPrefix, StringComparison.Ordinal)
+                    string.Equals(path, appendTempWritePath, StringComparison.Ordinal)
                     || path.StartsWith(mergedPrefix, StringComparison.Ordinal)
                     || path.StartsWith(postPrefix, StringComparison.Ordinal)
+                    // Overflow partition mid-write temps: ".new [part N].tmp.tmp"
+                    || (
+                        path.StartsWith(overflowPartPrefix, StringComparison.Ordinal)
+                        && path.EndsWith(".tmp.tmp", StringComparison.Ordinal)
+                    )
                 )
                     TryDelete(path);
             }
 
-            // 2. Salvage a fresh-export writer temp. Walk partitions in order: finalized ones are
+            // 2. If a complete fetch partition (.new.tmp) was left behind — either by a crash
+            //    after the fetch completed but before the merge ran, or by a previous run that
+            //    couldn't complete the merge (e.g., disk full) — try to complete the merge now.
+            //    If it still fails, leave the file in place so the next run can try again.
+            if (File.Exists(appendTempPath))
+            {
+                var mergeCompleted = await TryCompleteSavedMergeAsync(
+                    appendTempPath,
+                    outputFilePath,
+                    manifest,
+                    request.Channel.Id.ToString(),
+                    request.BaseOutputDirPath,
+                    cancellationToken
+                );
+
+                if (mergeCompleted)
+                {
+                    TryDelete(appendTempPath);
+                    // Overflow partitions were already promoted inside TryCompleteSavedMergeAsync.
+                    // Delete any that remain (orphaned because the main file was gone, or promotion
+                    // succeeded and they've already been moved).
+                    for (var i = 1; ; i++)
+                    {
+                        var overflowPath = MessageExporter.GetPartitionFilePath(appendTempPath, i);
+                        if (!File.Exists(overflowPath))
+                            break;
+                        TryDelete(overflowPath);
+                    }
+                }
+                // On failure, leave .new.tmp and overflow partitions for the next run to retry.
+            }
+
+            // 3. Salvage a fresh-export writer temp. Walk partitions in order: finalized ones are
             //    skipped (any stale ".tmp" sitting next to them is deleted), and the first gap is
             //    where a crash would have left the in-progress partition as a bare ".tmp".
             var salvaged = false;
@@ -172,6 +222,104 @@ internal static class CrashRecovery
         }
         catch
         {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Tries to complete a merge that was left stranded (either by a crash after the fetch
+    /// finished but before the merge ran, or by a previous merge attempt that failed mid-way
+    /// through, e.g. due to disk full). On success the merged output is in place, all overflow
+    /// partitions are promoted, and the manifest entry is cleared so the next export re-reads
+    /// the resume point from the merged file's actual contents. Returns <see langword="false"/>
+    /// on any failure (leaving all files untouched for the next run to retry).
+    /// </summary>
+    internal static async ValueTask<bool> TryCompleteSavedMergeAsync(
+        string appendTempPath,
+        string outputFilePath,
+        ExportManifest? manifest,
+        string channelId,
+        string baseOutputDirPath,
+        CancellationToken cancellationToken
+    )
+    {
+        try
+        {
+            var existingPartitionPaths = ExistingOutputRelocator.GetExistingPartitionFilePaths(
+                outputFilePath
+            );
+
+            if (existingPartitionPaths.Length == 0)
+            {
+                // The output file was deleted between runs (rare). appendTempPath contains the
+                // newest fetched messages with no existing baseline to merge into; just promote
+                // it directly to outputFilePath and handle any overflow partitions below.
+                File.Move(appendTempPath, outputFilePath, overwrite: false);
+
+                for (var i = 1; ; i++)
+                {
+                    var overflowPath = MessageExporter.GetPartitionFilePath(appendTempPath, i);
+                    if (!File.Exists(overflowPath))
+                        break;
+                    var targetPath = MessageExporter.GetPartitionFilePath(outputFilePath, i);
+                    File.Move(overflowPath, targetPath, overwrite: false);
+                }
+            }
+            else
+            {
+                var mergeTargetPath = existingPartitionPaths[^1];
+                var mergedTempPath = outputFilePath + ".merged.tmp";
+
+                try
+                {
+                    await IncrementalJsonAppender.MergeAsync(
+                        mergeTargetPath,
+                        appendTempPath,
+                        mergedTempPath,
+                        cancellationToken
+                    );
+                    File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
+                }
+                catch
+                {
+                    TryDelete(mergedTempPath);
+                    throw;
+                }
+
+                // Promote any overflow fetch partitions to real partition files.
+                var nextPartitionIndex = existingPartitionPaths.Length;
+                for (var i = 1; ; i++)
+                {
+                    var overflowPath = MessageExporter.GetPartitionFilePath(appendTempPath, i);
+                    if (!File.Exists(overflowPath))
+                        break;
+                    var targetPath = MessageExporter.GetPartitionFilePath(
+                        outputFilePath,
+                        nextPartitionIndex
+                    );
+                    File.Move(overflowPath, targetPath, overwrite: false);
+                    nextPartitionIndex++;
+                }
+            }
+
+            // Clear the manifest so the next run recomputes the resume point from the merged
+            // file rather than trusting a now-stale cached last-message ID.
+            if (manifest is not null)
+            {
+                manifest.RemoveEntry(channelId);
+                if (await manifest.SaveAsync(baseOutputDirPath) is { } saveEx)
+                    Console.Error.WriteLine(
+                        $"Crash recovery: manifest save failed after merge completion (resume point may be stale): {saveEx.Message}"
+                    );
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(
+                $"Crash recovery: saved-merge completion failed (will retry next run): {ex.Message}"
+            );
             return false;
         }
     }

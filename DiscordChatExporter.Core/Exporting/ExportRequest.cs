@@ -22,9 +22,13 @@ public partial class ExportRequest
 
     public string OutputDirPath { get; private set; }
 
-    public string AssetsDirPath { get; }
+    public string AssetsDirPath { get; private set; }
 
     public string BaseOutputDirPath { get; }
+
+    // Stored so RedirectOutputFilePath can recompute AssetsDirPath when it was derived (not
+    // explicitly provided). Null when the user passed --media-dir explicitly.
+    private readonly string? _assetsDirTemplate;
 
     // The deepest directory that is guaranteed to not move even if the output path template
     // (e.g. "%G/%T/%C/") expands differently due to a guild/category/channel rename. Used to
@@ -122,8 +126,9 @@ public partial class ExportRequest
 
         OutputDirPath = Path.GetDirectoryName(OutputFilePath)!;
 
-        AssetsDirPath = !string.IsNullOrWhiteSpace(assetsDirPath)
-            ? FormatPath(assetsDirPath, Guild, Channel, After, Before)
+        _assetsDirTemplate = !string.IsNullOrWhiteSpace(assetsDirPath) ? assetsDirPath : null;
+        AssetsDirPath = _assetsDirTemplate is not null
+            ? FormatPath(_assetsDirTemplate, Guild, Channel, After, Before)
             : $"{OutputFilePath}_Files{Path.DirectorySeparatorChar}";
 
         CultureInfo = Locale?.Pipe(CultureInfo.GetCultureInfo);
@@ -139,6 +144,10 @@ public partial class ExportRequest
     {
         OutputFilePath = existingOutputFilePath;
         OutputDirPath = Path.GetDirectoryName(OutputFilePath)!;
+        // When AssetsDirPath was derived from OutputFilePath (no explicit --media-dir), keep it
+        // in sync so cached assets from the existing export are still found via --reuse-media.
+        if (_assetsDirTemplate is null)
+            AssetsDirPath = $"{OutputFilePath}_Files{Path.DirectorySeparatorChar}";
     }
 
     public string GetHtmlSharedAssetsDirPath() => HtmlExport.GetSharedAssetsDirPath(OutputDirPath);

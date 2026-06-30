@@ -95,7 +95,7 @@ internal static class IncrementalJsonAppender
     private static (byte[] Header, int MessagesKeyIndex) ReadHeaderBytes(string filePath)
     {
         const int InitialHeaderSize = 4096;
-        const int MaxHeaderSize = 65536;
+        const int MaxHeaderSize = 1024 * 1024; // 1 MB — handles extreme guild/channel/topic lengths
 
         using var stream = File.OpenRead(filePath);
 

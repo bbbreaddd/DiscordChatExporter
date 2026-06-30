@@ -516,4 +516,19 @@ public static class ExportedChatParser
 
         return (members, roles, messageCount);
     }
+
+    /// <summary>
+    /// Streams individual <see cref="Message"/> objects from a JSON export file without loading
+    /// the entire file into memory. Equivalent to <see cref="StreamMessagesAsync"/> with each
+    /// element immediately parsed; suitable for callers that need <see cref="Message"/> objects
+    /// but cannot access <see cref="ExportedMessageParser"/> (which is internal).
+    /// </summary>
+    public static async IAsyncEnumerable<Message> StreamParsedMessagesAsync(
+        string filePath,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        await foreach (var json in StreamMessagesAsync(filePath, cancellationToken))
+            yield return ExportedMessageParser.ParseMessage(json);
+    }
 }

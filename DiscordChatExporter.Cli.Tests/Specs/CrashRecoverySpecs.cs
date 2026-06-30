@@ -175,4 +175,107 @@ public class CrashRecoverySpecs
         ok.Should().BeFalse();
         File.Exists(finalPath).Should().BeFalse();
     }
+
+    [Fact]
+    public async Task CompleteSavedMerge_merges_appendTempPath_into_existing_output()
+    {
+        // Arrange: existing output has messages A+B; appendTempPath has new messages C+D
+        // (simulating a crash after the fetch completed but before the merge ran).
+        var existingJson = BuildExportJson(("100", "msg A"), ("101", "msg B"));
+        var newJson = BuildExportJson(("102", "msg C"), ("103", "msg D"));
+
+        var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var outputFilePath = Path.Combine(dir, "export.json");
+            var appendTempPath = outputFilePath + ".new.tmp";
+
+            await File.WriteAllTextAsync(outputFilePath, existingJson);
+            await File.WriteAllTextAsync(appendTempPath, newJson);
+
+            // Act
+            var ok = await CrashRecovery.TryCompleteSavedMergeAsync(
+                appendTempPath,
+                outputFilePath,
+                manifest: null,
+                channelId: "555",
+                baseOutputDirPath: dir,
+                cancellationToken: default
+            );
+
+            // Assert: merge succeeded and the output file now has all 4 messages
+            ok.Should().BeTrue();
+            File.Exists(outputFilePath).Should().BeTrue();
+
+            var merged = await File.ReadAllTextAsync(outputFilePath);
+            using var doc = JsonDocument.Parse(merged);
+            var root = doc.RootElement;
+            root.GetProperty("messageCount").GetInt64().Should().Be(4);
+            root.GetProperty("messages").GetArrayLength().Should().Be(4);
+            merged.Should().Contain("msg A");
+            merged.Should().Contain("msg B");
+            merged.Should().Contain("msg C");
+            merged.Should().Contain("msg D");
+
+            // appendTempPath is left for the caller (RecoverAsync) to delete
+            File.Exists(appendTempPath).Should().BeTrue();
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CompleteSavedMerge_promotes_overflow_partitions()
+    {
+        // Arrange: existing output has one partition (messages A+B). The fetch produced enough
+        // messages to overflow into a second partition: appendTempPath has C+D, and the overflow
+        // temp (appendTempPath [part 2]) has E+F.
+        var existingJson = BuildExportJson(("100", "msg A"), ("101", "msg B"));
+        var appendJson = BuildExportJson(("102", "msg C"), ("103", "msg D"));
+        var overflowJson = BuildExportJson(("104", "msg E"), ("105", "msg F"));
+
+        var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var outputFilePath = Path.Combine(dir, "export.json");
+            var appendTempPath = outputFilePath + ".new.tmp";
+            // Overflow partition name matches MessageExporter.GetPartitionFilePath(appendTempPath, 1)
+            var overflowTempPath = Path.Combine(dir, "export.json.new [part 2].tmp");
+
+            await File.WriteAllTextAsync(outputFilePath, existingJson);
+            await File.WriteAllTextAsync(appendTempPath, appendJson);
+            await File.WriteAllTextAsync(overflowTempPath, overflowJson);
+
+            // Act
+            var ok = await CrashRecovery.TryCompleteSavedMergeAsync(
+                appendTempPath,
+                outputFilePath,
+                manifest: null,
+                channelId: "555",
+                baseOutputDirPath: dir,
+                cancellationToken: default
+            );
+
+            // Assert: overflow partition was promoted to a real partition file
+            ok.Should().BeTrue();
+            var expectedPartition2 = Path.Combine(dir, "export [part 2].json");
+            File.Exists(expectedPartition2).Should().BeTrue("overflow temp should be promoted");
+            File.Exists(overflowTempPath)
+                .Should()
+                .BeFalse("overflow temp should be gone after promotion");
+
+            using var doc2 = JsonDocument.Parse(await File.ReadAllTextAsync(expectedPartition2));
+            doc2.RootElement.GetProperty("messageCount").GetInt64().Should().Be(2);
+            (await File.ReadAllTextAsync(expectedPartition2)).Should().Contain("msg E");
+            (await File.ReadAllTextAsync(expectedPartition2)).Should().Contain("msg F");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }

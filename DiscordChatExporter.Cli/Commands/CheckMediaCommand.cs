@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using CliFx;
@@ -9,6 +8,8 @@ using CliFx.Binding;
 using CliFx.Infrastructure;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Utils.Extensions;
+using DiscordChatExporter.Core.Discord;
+using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Exporting.Converting;
 using DiscordChatExporter.Core.Exporting.Filtering;
@@ -156,16 +157,12 @@ public partial class CheckMediaCommand : DiscordCommandBase
             },
             async (inputFilePath, innerCancellationToken) =>
             {
-                ExportedChat chat;
+                // Stream only the header (guild/channel metadata) without loading the
+                // (potentially GB-sized) messages array into memory.
+                (Guild Guild, Channel Channel, Snowflake? After, Snowflake? Before) meta;
                 try
                 {
-                    await using var inputStream = File.OpenRead(inputFilePath);
-                    using var document = await JsonDocument.ParseAsync(
-                        inputStream,
-                        cancellationToken: innerCancellationToken
-                    );
-
-                    chat = ExportedChatParser.Parse(document.RootElement);
+                    meta = ExportedChatParser.ParseMetadata(inputFilePath);
                 }
                 // A directory of exports can legitimately contain unrelated JSON (e.g. a backup
                 // manifest) or a half-written file. Skip anything that isn't a valid export rather
@@ -187,13 +184,13 @@ public partial class CheckMediaCommand : DiscordCommandBase
                 // Reuse the export request machinery purely to resolve the per-channel media
                 // directory from the template (e.g. '%G/%T/%C/'); nothing is written.
                 var request = new ExportRequest(
-                    chat.Guild,
-                    chat.Channel,
+                    meta.Guild,
+                    meta.Channel,
                     Directory.GetCurrentDirectory(),
                     AssetsDirPath,
                     ExportFormat.PlainText,
-                    chat.After,
-                    chat.Before,
+                    meta.After,
+                    meta.Before,
                     PartitionLimit.Null,
                     MessageFilter.Null,
                     false,
@@ -206,7 +203,10 @@ public partial class CheckMediaCommand : DiscordCommandBase
                 );
 
                 var result = await MediaInspector.InspectAsync(
-                    chat,
+                    ExportedChatParser.StreamParsedMessagesAsync(
+                        inputFilePath,
+                        innerCancellationToken
+                    ),
                     request.AssetsDirPath,
                     ShouldDownloadMissing,
                     discord,

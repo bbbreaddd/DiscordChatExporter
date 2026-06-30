@@ -10,7 +10,7 @@ namespace DiscordChatExporter.Core.Exporting;
 
 public class ExportManifest
 {
-    private static readonly SemaphoreSlim SaveSemaphore = new(1, 1);
+    private readonly SemaphoreSlim SaveSemaphore = new(1, 1);
 
     [JsonPropertyName("channels")]
     public ConcurrentDictionary<string, ChannelManifestEntry> Channels { get; set; } = new();
