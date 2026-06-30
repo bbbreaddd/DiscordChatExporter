@@ -37,7 +37,8 @@ public class ExportManifest
         }
     }
 
-    public async ValueTask SaveAsync(string directoryPath)
+    // Returns null on success, or the exception on failure. Never throws.
+    public async ValueTask<Exception?> SaveAsync(string directoryPath)
     {
         var filePath = Path.Combine(directoryPath, ".discord_backup_manifest.json");
         var tempFilePath = filePath + ".tmp";
@@ -55,11 +56,12 @@ public class ExportManifest
                 );
             }
             File.Move(tempFilePath, filePath, true);
+            return null;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Failed to save manifest: {ex}");
-            // Ignore save failures to not crash the backup process
+            return ex;
         }
         finally
         {

@@ -45,17 +45,21 @@ internal static class CrashRecovery
             if (string.IsNullOrEmpty(dirPath) || !Directory.Exists(dirPath))
                 return;
 
-            // 1. Delete regenerable streaming-append scratch files. Everything produced by the
-            //    append path lives under the "<output>.new" or "<output>.merged" prefixes, so a
-            //    simple prefix match catches .new.tmp, .new.tmp.tmp, ".new [part N].tmp" and
-            //    .merged.tmp without having to enumerate partition indices.
+            // 1. Delete regenerable scratch files left by previous runs:
+            //    - Streaming-append temps: ".new.tmp", ".new.tmp.tmp", ".new [part N].tmp",
+            //      ".merged.tmp" — always regenerable from the real partition + manifest.
+            //    - HTML pagination post-processing temps: ".post.tmp" — regenerable by
+            //      re-converting. On SIGKILL the catch-block cleanup in ReplacePlaceholdersAsync
+            //      never runs, leaving these behind indefinitely.
             var newPrefix = outputFilePath + ".new";
             var mergedPrefix = outputFilePath + ".merged";
+            var postPrefix = outputFilePath + ".post";
             foreach (var path in Directory.EnumerateFiles(dirPath))
             {
                 if (
                     path.StartsWith(newPrefix, StringComparison.Ordinal)
                     || path.StartsWith(mergedPrefix, StringComparison.Ordinal)
+                    || path.StartsWith(postPrefix, StringComparison.Ordinal)
                 )
                     TryDelete(path);
             }
@@ -101,7 +105,7 @@ internal static class CrashRecovery
             if (salvaged && manifest is not null)
             {
                 manifest.RemoveEntry(request.Channel.Id.ToString());
-                await manifest.SaveAsync(request.BaseOutputDirPath);
+                _ = await manifest.SaveAsync(request.BaseOutputDirPath);
             }
         }
         catch (Exception ex)

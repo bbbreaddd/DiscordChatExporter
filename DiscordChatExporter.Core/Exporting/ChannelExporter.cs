@@ -288,7 +288,7 @@ public class ChannelExporter(DiscordClient discord)
                             updatedLastMessageId,
                             request.Channel.IsArchived
                         );
-                        await manifest.SaveAsync(request.BaseOutputDirPath);
+                        _ = await manifest.SaveAsync(request.BaseOutputDirPath);
                     }
                 }
             }
@@ -519,7 +519,7 @@ public class ChannelExporter(DiscordClient discord)
                         finalMaxMessageId?.ToString(),
                         request.Channel.IsArchived
                     );
-                    await manifest.SaveAsync(request.BaseOutputDirPath);
+                    _ = await manifest.SaveAsync(request.BaseOutputDirPath);
                 }
             }
         }

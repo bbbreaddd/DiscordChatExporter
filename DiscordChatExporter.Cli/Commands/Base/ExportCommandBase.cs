@@ -166,6 +166,13 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool IsIncremental { get; set; } = false;
 
     [CommandOption(
+        "strict",
+        Description = "Treat any per-channel export error as a fatal failure. "
+            + "By default the command succeeds as long as at least one channel exported successfully."
+    )]
+    public bool IsStrict { get; set; } = false;
+
+    [CommandOption(
         "fuck-russia",
         EnvironmentVariable = "FUCK_RUSSIA",
         Description = "Don't print the Support Ukraine message to the console.",
@@ -235,6 +242,45 @@ public abstract class ExportCommandBase : DiscordCommandBase
                     ? OutputPath
                     : Path.GetDirectoryName(OutputPath) ?? Directory.GetCurrentDirectory();
             manifest = await ExportManifest.LoadAsync(manifestDir);
+
+            // Pre-flight: verify the manifest directory is writable before spending hours
+            // on the export only to discover at the end that progress can't be saved.
+            if (await manifest.SaveAsync(manifestDir) is { } preflightError)
+            {
+                using (console.WithForegroundColor(ConsoleColor.Yellow))
+                {
+                    await console.Error.WriteLineAsync(
+                        $"Warning: cannot write the incremental export manifest to '{manifestDir}'."
+                    );
+                    await console.Error.WriteLineAsync($"Reason: {preflightError.Message}");
+                    await console.Error.WriteLineAsync(
+                        "Without a working manifest, all channels will be fully re-exported on the next run."
+                    );
+                }
+
+                await console.Error.WriteLineAsync();
+
+                if (console.IsInputRedirected)
+                {
+                    throw new CommandException(
+                        "Aborting: running non-interactively and the manifest cannot be saved. "
+                            + "Fix the manifest directory permissions or available storage and try again."
+                    );
+                }
+
+                await console.Error.WriteAsync(
+                    "Continue without manifest tracking this run? [y/N]: "
+                );
+                await console.Error.FlushAsync();
+                var response = await console.Input.ReadLineAsync();
+                await console.Error.WriteLineAsync();
+                if (!string.Equals(response?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new CommandException(
+                        "Aborting. Fix the manifest directory permissions or available storage and try again."
+                    );
+                }
+            }
         }
 
         // Make sure the user does not try to export multiple channels into one file.
@@ -279,20 +325,51 @@ public abstract class ExportCommandBase : DiscordCommandBase
                     yield return ch;
             }
 
-            // Threads are discovered lazily, one API page at a time
+            // Threads are discovered lazily, one API page at a time.
+            // Drive the enumerator manually so we can catch errors from MoveNextAsync without
+            // a try-catch around a yield (which C# forbids). A failure during thread
+            // enumeration (auth error, 5xx after all retries, etc.) logs a warning and stops
+            // yielding threads rather than propagating an exception through the async source,
+            // which would cancel all in-progress channel exports already being processed in
+            // parallel.
             if (ThreadInclusionMode != ThreadInclusionMode.None)
             {
-                await foreach (
-                    var thread in Discord.GetChannelThreadsAsync(
-                        channels,
-                        ThreadInclusionMode == ThreadInclusionMode.All,
-                        Before,
-                        After,
-                        manifest,
-                        cancellationToken
-                    )
-                )
+                var threadSource = Discord.GetChannelThreadsAsync(
+                    channels,
+                    ThreadInclusionMode == ThreadInclusionMode.All,
+                    Before,
+                    After,
+                    manifest,
+                    cancellationToken
+                );
+
+                await using var enumerator = threadSource.GetAsyncEnumerator(cancellationToken);
+                while (true)
                 {
+                    bool hasNext;
+                    try
+                    {
+                        hasNext = await enumerator.MoveNextAsync();
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw; // always propagate cancellation
+                    }
+                    catch (Exception ex)
+                    {
+                        using (console.WithForegroundColor(ConsoleColor.Yellow))
+                        {
+                            await console.Error.WriteLineAsync(
+                                $"Warning: thread enumeration failed — threads will be skipped this run: {ex.Message}"
+                            );
+                        }
+                        break;
+                    }
+
+                    if (!hasNext)
+                        break;
+
+                    var thread = enumerator.Current;
                     // Forums cannot be exported directly; their threads are already yielded
                     if (thread.Kind != ChannelKind.GuildForum)
                         yield return thread;
@@ -389,7 +466,16 @@ public abstract class ExportCommandBase : DiscordCommandBase
 
         if (manifest is not null && manifestDir is not null)
         {
-            await manifest.SaveAsync(manifestDir);
+            if (await manifest.SaveAsync(manifestDir) is not null)
+            {
+                using (console.WithForegroundColor(ConsoleColor.Yellow))
+                {
+                    await console.Error.WriteLineAsync(
+                        "Warning: final manifest save failed (storage may have filled during the run). "
+                            + "The next run will re-export all channels from scratch instead of resuming."
+                    );
+                }
+            }
         }
 
         // Print the result
@@ -442,9 +528,9 @@ public abstract class ExportCommandBase : DiscordCommandBase
             await console.Error.WriteLineAsync();
         }
 
-        // Fail the command only if ALL channels failed to export.
-        // If only some channels failed to export, it's okay.
-        if (errorsByChannel.Count >= totalChannelCount)
+        // With --strict, any per-channel error is fatal. Without it, only fail if every
+        // channel failed (the historical default, kept for backwards compatibility).
+        if (IsStrict ? errorsByChannel.Count > 0 : errorsByChannel.Count >= totalChannelCount)
             throw new CommandException("Export failed.");
     }
 

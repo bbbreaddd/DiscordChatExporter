@@ -139,6 +139,13 @@ public partial class ConvertCommand : ICommand
     )]
     public bool IsCompact { get; set; }
 
+    [CommandOption(
+        "strict",
+        Description = "Treat any per-file conversion error as a fatal failure. "
+            + "By default the command succeeds as long as at least one file converted successfully."
+    )]
+    public bool IsStrict { get; set; }
+
     public async ValueTask ExecuteAsync(IConsole console)
     {
         var cancellationToken = console.RegisterCancellationHandler();
@@ -528,9 +535,9 @@ public partial class ConvertCommand : ICommand
             await console.Error.WriteLineAsync();
         }
 
-        // Fail the command only if ALL files failed to convert.
-        // If only some files failed, it's okay.
-        if (errorsByFile.Count >= groupedInputFiles.Count)
+        // With --strict, any per-file error is fatal. Without it, only fail if every
+        // file failed (the historical default, kept for backwards compatibility).
+        if (IsStrict ? errorsByFile.Count > 0 : errorsByFile.Count >= groupedInputFiles.Count)
             throw new CommandException("Conversion failed.");
     }
 }
