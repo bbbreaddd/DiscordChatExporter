@@ -323,12 +323,18 @@ public partial class ConvertCommand : ICommand
             return false;
         }
 
-        static bool IsOutputNewerThanInput(string inputFilePath, string outputFilePath)
+        static bool IsOutputNewerThanInput(
+            IReadOnlyList<string> inputFilePaths,
+            string outputFilePath
+        )
         {
             if (!File.Exists(outputFilePath))
                 return false;
 
-            var inputWriteTime = File.GetLastWriteTimeUtc(inputFilePath);
+            // Use the most recently modified input partition as the reference. Only checking
+            // the first partition misses the case where new messages were appended to a later
+            // partition while earlier ones stayed unchanged.
+            var inputWriteTime = inputFilePaths.Max(File.GetLastWriteTimeUtc);
 
             for (var index = 0; ; index++)
             {
@@ -367,7 +373,7 @@ public partial class ConvertCommand : ICommand
             if (
                 ShouldSkipUnchanged
                 && TryGetKnownOutputFilePath(firstFilePath, out var knownOutputFilePath)
-                && IsOutputNewerThanInput(firstFilePath, knownOutputFilePath)
+                && IsOutputNewerThanInput(groupFilePaths, knownOutputFilePath)
             )
             {
                 return false;
@@ -377,7 +383,8 @@ public partial class ConvertCommand : ICommand
             var request = CreateRequest(guild, channel, after, before);
 
             if (
-                ShouldSkipUnchanged && IsOutputNewerThanInput(firstFilePath, request.OutputFilePath)
+                ShouldSkipUnchanged
+                && IsOutputNewerThanInput(groupFilePaths, request.OutputFilePath)
             )
             {
                 return false;

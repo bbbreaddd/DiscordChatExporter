@@ -188,6 +188,11 @@ public class ChannelExporter(DiscordClient discord)
             long newMessageCount = 0;
             Snowflake? newMaxMessageId = null;
             var isStreamingAppendCompletedSuccessfully = false;
+            // Set to true only after the merge AND the final File.Move both complete so we
+            // know that appendTempPath's contents are no longer needed. If the merge throws
+            // (e.g., disk full), we must NOT delete appendTempPath so the user can recover
+            // by freeing space and re-running; deleting it would force a full re-fetch.
+            var mergeCompleted = false;
 
             try
             {
@@ -248,6 +253,7 @@ public class ChannelExporter(DiscordClient discord)
                             CancellationToken.None
                         );
                         File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
+                        mergeCompleted = true;
 
                         // If the newly-fetched messages alone exceeded the partition limit, the
                         // writer above already split them into further temp partitions
@@ -294,8 +300,13 @@ public class ChannelExporter(DiscordClient discord)
             }
             finally
             {
-                // Always clean up temp files, even on failure
-                if (File.Exists(appendTempPath))
+                // Only delete appendTempPath if the merge completed successfully. If the merge
+                // threw (e.g., disk full), appendTempPath still contains the new messages and
+                // the user may be able to recover by freeing space and re-running. Deleting it
+                // here would force a full re-fetch from Discord on the next run.
+                // mergedTempPath is always safe to delete — it's either already been moved into
+                // place (by File.Move above) or never completed, so it's a partial temp at best.
+                if (mergeCompleted && File.Exists(appendTempPath))
                     File.Delete(appendTempPath);
                 if (File.Exists(mergedTempPath))
                     File.Delete(mergedTempPath);

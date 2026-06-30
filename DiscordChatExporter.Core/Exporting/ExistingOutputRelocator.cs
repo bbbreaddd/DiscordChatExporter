@@ -95,9 +95,16 @@ internal static class ExistingOutputRelocator
         catch (IOException)
         {
             // Undo whatever partitions were already moved before bailing out, so we never
-            // leave the export split between the old and new names.
-            for (var i = 0; i < movedCount; i++)
-                File.Move(newPartitionPaths[i], oldPartitionPaths[i]);
+            // leave the export split between the old and new names. The rollback itself can
+            // fail if the filesystem is in a bad state (e.g., became read-only between the
+            // forward move and the undo); swallow that too so a broken rollback never
+            // propagates an exception through RelocateIfNeeded into the channel exporter.
+            try
+            {
+                for (var i = 0; i < movedCount; i++)
+                    File.Move(newPartitionPaths[i], oldPartitionPaths[i]);
+            }
+            catch (IOException) { }
             return false;
         }
 

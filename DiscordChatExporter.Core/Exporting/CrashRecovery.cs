@@ -105,7 +105,10 @@ internal static class CrashRecovery
             if (salvaged && manifest is not null)
             {
                 manifest.RemoveEntry(request.Channel.Id.ToString());
-                _ = await manifest.SaveAsync(request.BaseOutputDirPath);
+                if (await manifest.SaveAsync(request.BaseOutputDirPath) is { } saveEx)
+                    Console.Error.WriteLine(
+                        $"Crash recovery: manifest save failed (resume point may be stale): {saveEx.Message}"
+                    );
             }
         }
         catch (Exception ex)

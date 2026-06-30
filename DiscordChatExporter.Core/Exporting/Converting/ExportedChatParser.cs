@@ -271,14 +271,16 @@ public static class ExportedChatParser
             // Ignore reader exceptions and fall back to full parsing
         }
 
-        // Fallback: Parse full document
-        using (var stream = System.IO.File.OpenRead(filePath))
-        using (var doc = JsonDocument.Parse(stream))
+        // Fallback: parse only the header (guild, channel, dateRange) without loading the
+        // (potentially GB-sized) messages array into memory. ParseHeader reads just enough of
+        // the file to reconstruct the header as a small standalone JSON document.
+        using (var doc = IncrementalJsonAppender.ParseHeader(filePath))
         {
-            var guild = ParseGuild(doc.RootElement.GetProperty("guild"));
-            var channel = ParseChannel(doc.RootElement.GetProperty("channel"), guild.Id);
+            var root = doc.RootElement;
+            var guild = ParseGuild(root.GetProperty("guild"));
+            var channel = ParseChannel(root.GetProperty("channel"), guild.Id);
 
-            var dateRange = doc.RootElement.GetProperty("dateRange");
+            var dateRange = root.GetProperty("dateRange");
             var after = dateRange
                 .GetPropertyOrNull("after")
                 ?.GetDateTimeOffsetOrNull()
