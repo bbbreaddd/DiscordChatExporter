@@ -167,7 +167,10 @@ public class ConvertSpecs
             IsUtcNormalizationEnabled = true,
         }.ExecuteAsync(new FakeConsole());
 
-        var outputFilePaths = Directory.GetFiles(outputDir.Path, "*", SearchOption.AllDirectories);
+        var outputFilePaths = Directory
+            .GetFiles(outputDir.Path, "*", SearchOption.AllDirectories)
+            .Where(path => !Path.GetFileName(path).EndsWith(".dce-converted"))
+            .ToArray();
 
         // Assert
         outputFilePaths.Should().HaveCount(2);

@@ -92,26 +92,42 @@ internal static class IncrementalJsonAppender
     /// be long and/or multi-byte Unicode. Never reads past the header into the (potentially
     /// huge) messages array itself.
     /// </summary>
-    private static (byte[] Header, int MessagesKeyIndex) ReadHeaderBytes(string filePath)
+    private static (byte[] Header, int MessagesKeyIndex, int BomLength) ReadHeaderBytes(
+        string filePath
+    )
     {
         const int InitialHeaderSize = 4096;
         const int MaxHeaderSize = 1024 * 1024; // 1 MB — handles extreme guild/channel/topic lengths
 
         using var stream = File.OpenRead(filePath);
 
+        // Skip a leading UTF-8 BOM if present. DiscordChatExporter never writes one, but a file
+        // re-saved once by a BOM-emitting external tool would otherwise make every offset below
+        // wrong and JsonDocument.Parse throw on every subsequent incremental run for that file.
+        var bomLength = 0;
+        if (stream.Length >= 3)
+        {
+            Span<byte> bomBuffer = stackalloc byte[3];
+            stream.ReadExactly(bomBuffer);
+            if (bomBuffer[0] == 0xEF && bomBuffer[1] == 0xBB && bomBuffer[2] == 0xBF)
+                bomLength = 3;
+            else
+                stream.Seek(0, SeekOrigin.Begin);
+        }
+
         var headerSize = InitialHeaderSize;
         while (true)
         {
-            var headerLength = (int)Math.Min(headerSize, stream.Length);
+            var headerLength = (int)Math.Min(headerSize, stream.Length - bomLength);
             var header = new byte[headerLength];
-            stream.Seek(0, SeekOrigin.Begin);
+            stream.Seek(bomLength, SeekOrigin.Begin);
             stream.ReadExactly(header);
 
             var msgsIdx = header.AsSpan().IndexOf(MessagesKey);
             if (msgsIdx >= 0)
-                return (header, msgsIdx);
+                return (header, msgsIdx, bomLength);
 
-            if (headerLength >= stream.Length || headerSize >= MaxHeaderSize)
+            if (headerLength >= stream.Length - bomLength || headerSize >= MaxHeaderSize)
                 throw new InvalidDataException(
                     $"Could not find 'messages' array property in '{filePath}'. "
                         + "The file may be corrupt or in an unexpected format."
@@ -145,7 +161,7 @@ internal static class IncrementalJsonAppender
     /// </summary>
     public static long FindMessagesArrayOpenOffset(string filePath)
     {
-        var (header, msgsIdx) = ReadHeaderBytes(filePath);
+        var (header, msgsIdx, bomLength) = ReadHeaderBytes(filePath);
 
         // Find the '[' that opens the array (comes immediately after "messages":)
         var afterKey = header.AsSpan(msgsIdx + MessagesKey.Length);
@@ -155,7 +171,7 @@ internal static class IncrementalJsonAppender
                 $"Could not find opening '[' of messages array in '{filePath}'."
             );
 
-        return msgsIdx + MessagesKey.Length + openBracketOffset;
+        return bomLength + msgsIdx + MessagesKey.Length + openBracketOffset;
     }
 
     /// <summary>
@@ -166,7 +182,7 @@ internal static class IncrementalJsonAppender
     /// </summary>
     public static JsonDocument ParseHeader(string filePath)
     {
-        var (header, msgsIdx) = ReadHeaderBytes(filePath);
+        var (header, msgsIdx, _) = ReadHeaderBytes(filePath);
 
         // Trim trailing whitespace and the comma that separated the header from the
         // "messages" property, then close the root object, turning the header prefix into a
@@ -268,6 +284,106 @@ internal static class IncrementalJsonAppender
                 break;
             await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             remaining -= read;
+        }
+    }
+
+    /// <summary>
+    /// Returns the "id" of the last message in the <c>messages</c> array (the one nearest the
+    /// closing <c>]</c>), or <see langword="null"/> if the array is empty or the file can't be
+    /// read. Used to check whether a saved-merge replay would duplicate messages that are
+    /// already present in the target, without loading the (potentially huge) file into memory.
+    /// </summary>
+    public static string? TryGetLastMessageId(string filePath)
+    {
+        try
+        {
+            return ScanLastMessageId(filePath, FindMessagesArrayOpenOffset(filePath));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? ScanLastMessageId(string filePath, long arrayOpenOffset)
+    {
+        using var stream = File.OpenRead(filePath);
+        stream.Seek(arrayOpenOffset, SeekOrigin.Begin); // positioned at '['
+
+        var buffer = new byte[64 * 1024];
+        var dataLength = 0;
+        var state = new JsonReaderState();
+
+        var started = false;
+        string? lastId = null;
+        // Set right after seeing a depth-2 "id" property name (the message object's own id,
+        // written first -- see JsonMessageWriter.WriteMessageAsync), cleared once its string
+        // value is captured. Nested ids (author.id, mentions[].id, etc.) sit one level deeper
+        // and are never seen at this depth.
+        var capturingId = false;
+
+        while (true)
+        {
+            var read = stream.Read(buffer, dataLength, buffer.Length - dataLength);
+            var isFinalBlock = read == 0;
+            dataLength += read;
+
+            var reader = new Utf8JsonReader(buffer.AsSpan(0, dataLength), isFinalBlock, state);
+            var reachedEnd = false;
+
+            try
+            {
+                while (reader.Read())
+                {
+                    if (!started)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray)
+                            started = true;
+                        continue;
+                    }
+
+                    if (
+                        reader.TokenType == JsonTokenType.PropertyName
+                        && reader.CurrentDepth == 2
+                        && reader.ValueTextEquals("id"u8)
+                    )
+                    {
+                        capturingId = true;
+                    }
+                    else if (capturingId)
+                    {
+                        if (reader.TokenType == JsonTokenType.String)
+                            lastId = reader.GetString();
+                        capturingId = false;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.EndArray && reader.CurrentDepth == 0)
+                    {
+                        reachedEnd = true;
+                        break;
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // A truncated trailing message never finished being read, so it can't have
+                // overwritten 'lastId' with a half-written value -- whatever was captured from
+                // the last fully-read message is still correct.
+                return lastId;
+            }
+
+            if (reachedEnd || isFinalBlock)
+                return lastId;
+
+            var consumed = (int)reader.BytesConsumed;
+            state = reader.CurrentState;
+            var leftover = dataLength - consumed;
+            if (leftover > 0)
+                Buffer.BlockCopy(buffer, consumed, buffer, 0, leftover);
+            dataLength = leftover;
+
+            if (dataLength == buffer.Length)
+                Array.Resize(ref buffer, buffer.Length * 2);
         }
     }
 }

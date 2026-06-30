@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord;
@@ -23,7 +24,7 @@ public partial class ExportGuildCommand : ExportCommandBase
     {
         await base.ExecuteAsync(console);
 
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
         var channels = new List<Channel>();
 
         await console.Output.WriteLineAsync("Fetching channels...");

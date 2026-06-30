@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord.Data;
@@ -36,7 +37,7 @@ public partial class ExportAllCommand : ExportCommandBase
     {
         await base.ExecuteAsync(console);
 
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
         var channels = new List<Channel>();
 
         // Pull from the API

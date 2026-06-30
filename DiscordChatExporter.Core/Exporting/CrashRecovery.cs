@@ -177,7 +177,8 @@ internal static class CrashRecovery
     internal static async ValueTask<bool> TryRepairAndPromoteAsync(
         string tempPath,
         string finalPath,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        bool overwrite = false
     )
     {
         try
@@ -217,7 +218,7 @@ internal static class CrashRecovery
                 await fs.FlushAsync(cancellationToken);
             }
 
-            File.Move(tempPath, finalPath, overwrite: false);
+            File.Move(tempPath, finalPath, overwrite);
             return true;
         }
         catch
@@ -270,20 +271,42 @@ internal static class CrashRecovery
                 var mergeTargetPath = existingPartitionPaths[^1];
                 var mergedTempPath = outputFilePath + ".merged.tmp";
 
-                try
+                // If the process died after the merge below already committed but before this
+                // whole completion routine finished (e.g. mid manifest save, or before
+                // appendTempPath got deleted), appendTempPath survives untouched and this method
+                // gets called again on the next run. The streaming-append merge has no id-based
+                // dedup (unlike the legacy whole-file rewrite path's DistinctBy), so blindly
+                // re-merging would duplicate every message in appendTempPath. Detect that by
+                // checking whether the merge target's last message already matches
+                // appendTempPath's last message -- if so, this exact batch is already merged in,
+                // and only the overflow-partition promotion / cleanup below still needs to run
+                // (those are already idempotent: a promoted file is gone from its old path, so
+                // re-running that loop is a no-op).
+                var appendLastMessageId = IncrementalJsonAppender.TryGetLastMessageId(
+                    appendTempPath
+                );
+                var alreadyMerged =
+                    appendLastMessageId is not null
+                    && appendLastMessageId
+                        == IncrementalJsonAppender.TryGetLastMessageId(mergeTargetPath);
+
+                if (!alreadyMerged)
                 {
-                    await IncrementalJsonAppender.MergeAsync(
-                        mergeTargetPath,
-                        appendTempPath,
-                        mergedTempPath,
-                        cancellationToken
-                    );
-                    File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
-                }
-                catch
-                {
-                    TryDelete(mergedTempPath);
-                    throw;
+                    try
+                    {
+                        await IncrementalJsonAppender.MergeAsync(
+                            mergeTargetPath,
+                            appendTempPath,
+                            mergedTempPath,
+                            cancellationToken
+                        );
+                        File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
+                    }
+                    catch
+                    {
+                        TryDelete(mergedTempPath);
+                        throw;
+                    }
                 }
 
                 // Promote any overflow fetch partitions to real partition files.

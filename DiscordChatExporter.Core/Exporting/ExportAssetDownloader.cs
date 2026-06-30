@@ -92,6 +92,18 @@ internal partial class ExportAssetDownloader(
 
         Directory.CreateDirectory(workingDirPath);
 
+        // Download to a process-unique temp file and atomically rename into place, rather than
+        // writing straight to 'filePath'. The in-process Locker above only guards against races
+        // within this process; a second OS process downloading the same URL into the same
+        // shared media dir (e.g. a 'checkmedia --download' run overlapping a scheduled export)
+        // would otherwise both open 'filePath' with FileShare.None, the loser would get an
+        // IOException, and its catch-all cleanup would unlink the file out from under the
+        // winner's still-open handle (the winner keeps writing successfully to the now-deleted
+        // inode and never notices). A unique temp name means both processes can download
+        // independently with no collision, and the final rename is atomic -- whichever one
+        // lands last simply wins with a complete file either way.
+        var tempFilePath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+
         try
         {
             await Http.ResiliencePipeline.ExecuteAsync(
@@ -106,11 +118,15 @@ internal partial class ExportAssetDownloader(
 
                     response.EnsureSuccessStatusCode();
 
-                    await using var output = File.Create(filePath);
-                    await response.Content.CopyToAsync(output, innerCancellationToken);
+                    await using (var output = File.Create(tempFilePath))
+                    {
+                        await response.Content.CopyToAsync(output, innerCancellationToken);
 
-                    if (output.Length <= 0)
-                        throw new HttpRequestException("Downloaded asset is empty.");
+                        if (output.Length <= 0)
+                            throw new HttpRequestException("Downloaded asset is empty.");
+                    }
+
+                    File.Move(tempFilePath, filePath, true);
                 },
                 cancellationToken
             );
@@ -118,11 +134,10 @@ internal partial class ExportAssetDownloader(
         catch
         {
             // A download interrupted mid-stream (cancellation, timeout, network error) leaves a
-            // truncated file behind. Left in place, a later run would see it via File.Exists and
-            // treat the corrupt partial as a complete cache hit, so remove it before bubbling up.
+            // truncated temp file behind. Clean it up; 'filePath' itself was never touched.
             try
             {
-                File.Delete(filePath);
+                File.Delete(tempFilePath);
             }
             catch (IOException) { }
 
@@ -137,9 +152,17 @@ internal partial class ExportAssetDownloader
 {
     private static string NormalizeUrl(string url)
     {
-        // Remove signature parameters from Discord CDN URLs to normalize them
+        // Remove signature parameters from Discord CDN URLs to normalize them. Both hosts below
+        // sign URLs with the same ex/is/hm query params (media.discordapp.net is what embed
+        // thumbnail/image ProxyUrls typically use -- see DiscordClient's own signed-host check).
+        // Without stripping it here too, the same logical asset re-resolved with a freshly
+        // signed media.discordapp.net URL would hash to a different cache file name, defeating
+        // the dedup that the shared media folder exists for.
         var uri = new Uri(url);
-        if (!string.Equals(uri.Host, "cdn.discordapp.com", StringComparison.OrdinalIgnoreCase))
+        if (
+            !string.Equals(uri.Host, "cdn.discordapp.com", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(uri.Host, "media.discordapp.net", StringComparison.OrdinalIgnoreCase)
+        )
             return url;
 
         var query = HttpUtility.ParseQueryString(uri.Query);

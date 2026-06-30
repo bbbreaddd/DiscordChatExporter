@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -18,6 +19,27 @@ internal static class HtmlSharedAssets
 
     public static string IconsFileName => "icons.svg";
 
+    // The rendered content is fully deterministic for a given format/theme, so concurrently
+    // exported/converted channels sharing this directory (--parallel N>1) can race here safely:
+    // each writer renders identical content to its own uniquely-named temp file and atomically
+    // renames it into place, so the loser's rename just overwrites with byte-identical content
+    // instead of risking a truncated/corrupted shared file from two writers racing on the same
+    // path (the previous check-then-write pattern had no such guarantee).
+    private static async ValueTask WriteIfMissingAsync(
+        string filePath,
+        Func<CancellationToken, Task<string>> renderContentAsync,
+        CancellationToken cancellationToken
+    )
+    {
+        if (File.Exists(filePath))
+            return;
+
+        var tempFilePath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+        var content = await renderContentAsync(cancellationToken);
+        await File.WriteAllTextAsync(tempFilePath, content, cancellationToken);
+        File.Move(tempFilePath, filePath, true);
+    }
+
     public static async ValueTask WriteAsync(
         ExportContext context,
         string themeName,
@@ -27,38 +49,33 @@ internal static class HtmlSharedAssets
         var dirPath = context.Request.GetHtmlSharedAssetsDirPath();
         Directory.CreateDirectory(dirPath);
 
-        var styleFilePath = Path.Combine(dirPath, GetStyleFileName(themeName));
-        if (!File.Exists(styleFilePath))
-        {
-            var content = context.MinifyCss(
-                await new HtmlStyleTemplate
-                {
-                    Context = context,
-                    ThemeName = themeName,
-                    ResolveFontUrls = false,
-                }.RenderAsync(cancellationToken)
-            );
+        await WriteIfMissingAsync(
+            Path.Combine(dirPath, GetStyleFileName(themeName)),
+            async ct =>
+                context.MinifyCss(
+                    await new HtmlStyleTemplate
+                    {
+                        Context = context,
+                        ThemeName = themeName,
+                        ResolveFontUrls = false,
+                    }.RenderAsync(ct)
+                ),
+            cancellationToken
+        );
 
-            await File.WriteAllTextAsync(styleFilePath, content, cancellationToken);
-        }
+        await WriteIfMissingAsync(
+            Path.Combine(dirPath, ScriptsFileName),
+            ct => new HtmlScriptTemplate { Context = context }.RenderAsync(ct),
+            cancellationToken
+        );
 
-        var scriptsFilePath = Path.Combine(dirPath, ScriptsFileName);
-        if (!File.Exists(scriptsFilePath))
-        {
-            var content = await new HtmlScriptTemplate { Context = context }.RenderAsync(
-                cancellationToken
-            );
-            await File.WriteAllTextAsync(scriptsFilePath, content, cancellationToken);
-        }
-
-        var iconsFilePath = Path.Combine(dirPath, IconsFileName);
-        if (!File.Exists(iconsFilePath))
-        {
-            var content =
+        await WriteIfMissingAsync(
+            Path.Combine(dirPath, IconsFileName),
+            async ct =>
                 "<svg xmlns=\"http://www.w3.org/2000/svg\"><defs>"
-                + await new HtmlIconsTemplate().RenderAsync(cancellationToken)
-                + "</defs></svg>";
-            await File.WriteAllTextAsync(iconsFilePath, content, cancellationToken);
-        }
+                + await new HtmlIconsTemplate().RenderAsync(ct)
+                + "</defs></svg>",
+            cancellationToken
+        );
     }
 }

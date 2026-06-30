@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord;
@@ -77,7 +78,7 @@ public partial class CheckMediaCommand : DiscordCommandBase
     {
         await base.ExecuteAsync(console);
 
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         // A token is only needed to refresh expired Discord links while downloading. Report-only
         // and token-less downloads still work (the latter just can't recover expired CDN links).

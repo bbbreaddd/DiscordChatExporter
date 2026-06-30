@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
@@ -148,7 +149,7 @@ public partial class ConvertCommand : ICommand
 
     public async ValueTask ExecuteAsync(IConsole console)
     {
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         if (ExportFormat == ExportFormat.Json)
         {
@@ -323,6 +324,26 @@ public partial class ConvertCommand : ICommand
             return false;
         }
 
+        // A completion marker, written only after ConvertStreamingAsync returns without throwing
+        // for the *entire* file group. "The next partition file doesn't exist" used to be the
+        // signal for "conversion complete," but that's indistinguishable from "conversion was
+        // interrupted right after finishing this partition" -- MessageExporter always finalizes
+        // whatever partition was in progress when disposed, including on an exception/cancellation
+        // unwind (now: a clean repaired-and-truncated partial, see MessageExporter.Abandon, but
+        // still a partial). Without an explicit, success-only signal, --skip-unchanged would
+        // permanently skip reprocessing the unconverted remainder. The marker's own mtime, set the
+        // moment conversion actually finished, is what gets compared against the input -- so it's
+        // also naturally invalidated the same way a partition file's mtime always was.
+        static string GetCompletionMarkerFilePath(string outputFilePath)
+        {
+            var dirPath = Path.GetDirectoryName(outputFilePath);
+            var markerFileName = $".{Path.GetFileName(outputFilePath)}.dce-converted";
+
+            return !string.IsNullOrWhiteSpace(dirPath)
+                ? Path.Combine(dirPath, markerFileName)
+                : markerFileName;
+        }
+
         static bool IsOutputNewerThanInput(
             IReadOnlyList<string> inputFilePaths,
             string outputFilePath
@@ -331,34 +352,16 @@ public partial class ConvertCommand : ICommand
             if (!File.Exists(outputFilePath))
                 return false;
 
+            var markerFilePath = GetCompletionMarkerFilePath(outputFilePath);
+            if (!File.Exists(markerFilePath))
+                return false;
+
             // Use the most recently modified input partition as the reference. Only checking
             // the first partition misses the case where new messages were appended to a later
             // partition while earlier ones stayed unchanged.
             var inputWriteTime = inputFilePaths.Max(File.GetLastWriteTimeUtc);
 
-            for (var index = 0; ; index++)
-            {
-                var partitionFilePath = GetPartitionFilePath(outputFilePath, index);
-
-                if (!File.Exists(partitionFilePath))
-                    return index > 0;
-
-                if (File.GetLastWriteTimeUtc(partitionFilePath) < inputWriteTime)
-                    return false;
-            }
-        }
-
-        static string GetPartitionFilePath(string baseFilePath, int partitionIndex)
-        {
-            if (partitionIndex <= 0)
-                return baseFilePath;
-
-            var fileNameWithoutExt = Path.GetFileNameWithoutExtension(baseFilePath);
-            var fileExt = Path.GetExtension(baseFilePath);
-            var fileName = $"{fileNameWithoutExt} [part {partitionIndex + 1}]{fileExt}";
-            var dirPath = Path.GetDirectoryName(baseFilePath);
-
-            return !string.IsNullOrWhiteSpace(dirPath) ? Path.Combine(dirPath, fileName) : fileName;
+            return File.GetLastWriteTimeUtc(markerFilePath) >= inputWriteTime;
         }
 
         // Converts a group of partitioned files representing a single channel.
@@ -417,6 +420,14 @@ public partial class ConvertCommand : ICommand
                 request,
                 getRebaseLocalAssetPath,
                 progress,
+                innerCancellationToken
+            );
+
+            // Reaching here means every message in every input partition converted without
+            // throwing -- only now is it safe to mark the output as fully up to date.
+            await File.WriteAllTextAsync(
+                GetCompletionMarkerFilePath(request.OutputFilePath),
+                DateTimeOffset.UtcNow.ToString("O"),
                 innerCancellationToken
             );
 

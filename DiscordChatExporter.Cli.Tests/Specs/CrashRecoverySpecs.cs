@@ -278,4 +278,55 @@ public class CrashRecoverySpecs
             Directory.Delete(dir, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task CompleteSavedMerge_does_not_duplicate_messages_when_replayed_after_the_merge_already_committed()
+    {
+        // Arrange: simulates a crash that happens *after* a previous TryCompleteSavedMergeAsync
+        // call already merged appendTempPath's messages into the output, but before it (or its
+        // caller) got around to deleting appendTempPath -- so this method runs again on the next
+        // recovery pass with the exact same appendTempPath still on disk. The streaming-append
+        // merge has no id-based dedup, so a naive replay would duplicate every message in it.
+        var alreadyMergedJson = BuildExportJson(
+            ("100", "msg A"),
+            ("101", "msg B"),
+            ("102", "msg C"),
+            ("103", "msg D")
+        );
+        var appendJson = BuildExportJson(("102", "msg C"), ("103", "msg D"));
+
+        var dir = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var outputFilePath = Path.Combine(dir, "export.json");
+            var appendTempPath = outputFilePath + ".new.tmp";
+
+            await File.WriteAllTextAsync(outputFilePath, alreadyMergedJson);
+            await File.WriteAllTextAsync(appendTempPath, appendJson);
+
+            // Act
+            var ok = await CrashRecovery.TryCompleteSavedMergeAsync(
+                appendTempPath,
+                outputFilePath,
+                manifest: null,
+                channelId: "555",
+                baseOutputDirPath: dir,
+                cancellationToken: default
+            );
+
+            // Assert: still exactly 4 messages, not 6
+            ok.Should().BeTrue();
+
+            var merged = await File.ReadAllTextAsync(outputFilePath);
+            using var doc = JsonDocument.Parse(merged);
+            var root = doc.RootElement;
+            root.GetProperty("messageCount").GetInt64().Should().Be(4);
+            root.GetProperty("messages").GetArrayLength().Should().Be(4);
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
 }

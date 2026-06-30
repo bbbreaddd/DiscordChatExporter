@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Commands.Converters;
 using DiscordChatExporter.Cli.Commands.Shared;
@@ -31,7 +32,7 @@ public partial class GetChannelsCommand : DiscordCommandBase
     {
         await base.ExecuteAsync(console);
 
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         var channels = (await Discord.GetGuildChannelsAsync(GuildId, cancellationToken))
             .Where(c => !c.IsCategory)

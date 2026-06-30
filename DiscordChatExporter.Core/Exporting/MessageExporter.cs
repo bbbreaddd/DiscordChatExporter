@@ -16,7 +16,32 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
     private readonly System.Collections.Generic.List<HtmlPageFeatures> _htmlPageFeaturesByPartition =
     [];
 
+    private bool _abandoned;
+    private bool _abandonOverwrite;
+
     public long MessagesExported { get; private set; }
+
+    // Marks the in-progress partition as aborted rather than complete. Call this from a 'catch'
+    // around ExportMessageAsync before rethrowing, so disposal (whether from a normal 'await
+    // using' unwind or an exception unwind) repairs the partial write instead of finalizing it
+    // as-is. Without this, a mid-message exception (a transient API failure, a markdown error, a
+    // disk hiccup) would still flow through the normal postamble-write-and-rename path and
+    // produce a structurally "complete" file over what's actually a truncated/malformed trailing
+    // message -- indistinguishable from a real success.
+    //
+    // 'allowOverwrite' controls whether the repaired partial is allowed to replace an
+    // already-existing file at the final path. Pass true only when the output is always fully
+    // regenerable from some other source of truth (e.g. 'convert' re-reading JSON input) -- in
+    // that case overwriting with the best partial we got matches the normal happy-path semantics
+    // (which already always overwrites) and a future run simply regenerates the rest. Leave it
+    // false (default) when the final path may hold previously-good, non-regenerable data (e.g. a
+    // live incremental export rewriting from an existing file): never destroy that with a
+    // smaller partial: just leave it untouched and retry next time.
+    public void Abandon(bool allowOverwrite = false)
+    {
+        _abandoned = true;
+        _abandonOverwrite = allowOverwrite;
+    }
 
     private async ValueTask<MessageWriter> InitializeWriterAsync(
         CancellationToken cancellationToken = default
@@ -60,6 +85,35 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
             var filePath = _activeFilePath;
             var tempFilePath = _activeTempFilePath;
 
+            if (_abandoned)
+            {
+                // Don't trust the writer to produce a valid postamble over data that may have
+                // been interrupted mid-message: just release the file handle. The bytes already
+                // flushed to tempFilePath are repaired below using the same scan-and-truncate
+                // logic crash recovery uses for a real process kill, so a cooperative abandon and
+                // an actual hard kill converge on one tested code path instead of two.
+                await _writer.DisposeAsync();
+                _writer = null;
+                _activeFilePath = null;
+                _activeTempFilePath = null;
+
+                if (tempFilePath is not null && filePath is not null && File.Exists(tempFilePath))
+                {
+                    // Best-effort: if nothing salvageable survived, or the final path already
+                    // holds data we're not allowed to overwrite, this just leaves tempFilePath
+                    // in place exactly as a real crash would -- the next run's crash recovery
+                    // (or, for 'convert', a plain retry) picks it up from there.
+                    _ = await CrashRecovery.TryRepairAndPromoteAsync(
+                        tempFilePath,
+                        filePath,
+                        cancellationToken,
+                        _abandonOverwrite
+                    );
+                }
+
+                return;
+            }
+
             try
             {
                 if (_writer is HtmlMessageWriter htmlWriter)
@@ -95,6 +149,15 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
 
     public async ValueTask DisposeAsync()
     {
+        if (_abandoned)
+        {
+            // An empty placeholder would be just as misleading as a corrupt one, and pagination
+            // post-processing expects a clean set of finalized partitions -- skip both and just
+            // let UninitializeWriterAsync repair/leave whatever was in flight.
+            await UninitializeWriterAsync();
+            return;
+        }
+
         // If not messages were written, force the creation of an empty file
         if (MessagesExported <= 0)
             _ = await InitializeWriterAsync();

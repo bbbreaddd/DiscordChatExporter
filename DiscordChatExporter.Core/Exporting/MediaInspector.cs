@@ -344,10 +344,26 @@ public static class MediaInspector
 
         Directory.CreateDirectory(Path.GetDirectoryName(ledgerPath)!);
 
-        // Write to a temp file and move into place so a concurrent reader never sees a half-written
-        // ledger.
-        var tempPath = ledgerPath + ".tmp";
-        await File.WriteAllLinesAsync(tempPath, deadUrls, cancellationToken);
-        File.Move(tempPath, ledgerPath, overwrite: true);
+        // Write to a process-unique temp file and move into place, so a concurrent reader never
+        // sees a half-written ledger. A fixed ".tmp" name would let two processes writing the
+        // ledger for the same dir concurrently (e.g. two 'checkmedia' invocations, or a backup
+        // and a manual run overlapping) interleave their writes and move each other's temp file
+        // out from under them, faulting one of them with an uncaught FileNotFoundException.
+        var tempPath = $"{ledgerPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await File.WriteAllLinesAsync(tempPath, deadUrls, cancellationToken);
+            File.Move(tempPath, ledgerPath, overwrite: true);
+        }
+        // Best-effort, like the rest of the ledger machinery: a failure to persist the ledger
+        // should never fault the whole parallel checkmedia sweep over one channel.
+        catch (IOException)
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch (IOException) { }
+        }
     }
 }

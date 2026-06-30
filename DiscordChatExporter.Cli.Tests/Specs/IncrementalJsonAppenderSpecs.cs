@@ -1,5 +1,6 @@
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -183,5 +184,86 @@ public class IncrementalJsonAppenderSpecs
         root.GetProperty("channel").GetProperty("category").GetString().Should().Be("New Category");
         root.GetProperty("messageCount").GetInt64().Should().Be(3);
         root.GetProperty("messages").GetArrayLength().Should().Be(3);
+    }
+
+    [Fact]
+    public async Task I_can_get_the_last_message_id_ignoring_nested_ids_like_the_author_id()
+    {
+        // Arrange
+        using var file = TempFile.Create();
+
+        // Every message's author has id "900" (see BuildMessage), which sits at a deeper
+        // nesting level right after each message's own id -- a naive last-occurrence search
+        // would wrongly return "900" instead of the last message's own id.
+        await File.WriteAllTextAsync(
+            file.Path,
+            BuildExportJson(
+                "Guild",
+                "channel",
+                "Category",
+                "555",
+                ("100", "first message"),
+                ("101", "second message"),
+                ("102", "third message")
+            )
+        );
+
+        // Act
+        var lastMessageId = IncrementalJsonAppender.TryGetLastMessageId(file.Path);
+
+        // Assert
+        lastMessageId.Should().Be("102");
+    }
+
+    [Fact]
+    public void Getting_the_last_message_id_of_an_empty_export_returns_null()
+    {
+        // Arrange
+        using var file = TempFile.Create();
+        File.WriteAllText(file.Path, BuildExportJson("Guild", "channel", "Category", "555"));
+
+        // Act & assert
+        IncrementalJsonAppender.TryGetLastMessageId(file.Path).Should().BeNull();
+    }
+
+    [Fact]
+    public void I_can_parse_the_header_and_find_the_messages_array_of_a_file_that_starts_with_a_UTF8_BOM()
+    {
+        // Arrange: a file re-saved once by a BOM-emitting external tool. DiscordChatExporter
+        // itself never writes one, but a file that picked one up shouldn't permanently break
+        // every subsequent incremental run for that channel.
+        using var file = TempFile.Create();
+
+        var json = BuildExportJson(
+            "Guild",
+            "channel",
+            "Category",
+            "555",
+            ("100", "first message"),
+            ("101", "second message")
+        );
+        var bomBytes = new byte[] { 0xEF, 0xBB, 0xBF };
+        var jsonBytes = Encoding.UTF8.GetBytes(json);
+        File.WriteAllBytes(file.Path, [.. bomBytes, .. jsonBytes]);
+
+        // Act
+        using var header = IncrementalJsonAppender.ParseHeader(file.Path);
+        var arrayOpenOffset = IncrementalJsonAppender.FindMessagesArrayOpenOffset(file.Path);
+        var lastMessageId = IncrementalJsonAppender.TryGetLastMessageId(file.Path);
+
+        // Assert
+        header
+            .RootElement.GetProperty("channel")
+            .GetProperty("name")
+            .GetString()
+            .Should()
+            .Be("channel");
+
+        // The offset must point at the actual '[' in the *original* (BOM-prefixed) file, not at
+        // an offset that's off by the BOM's length.
+        var fileBytes = File.ReadAllBytes(file.Path);
+        fileBytes[arrayOpenOffset].Should().Be((byte)'[');
+
+        lastMessageId.Should().Be("101");
     }
 }

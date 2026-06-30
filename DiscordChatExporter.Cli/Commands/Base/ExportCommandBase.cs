@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
 using CliFx.Infrastructure;
+using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Converters;
 using DiscordChatExporter.Cli.Commands.Shared;
 using DiscordChatExporter.Cli.Utils.Extensions;
@@ -186,7 +187,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
 
     protected async ValueTask ExportAsync(IConsole console, IReadOnlyList<Channel> channels)
     {
-        var cancellationToken = console.RegisterCancellationHandler();
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         // --media and --cache-media are mutually exclusive ways of triggering asset downloads
         if (ShouldDownloadAssets && ShouldCacheAssetsOnly)

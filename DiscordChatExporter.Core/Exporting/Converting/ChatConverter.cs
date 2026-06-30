@@ -24,14 +24,25 @@ public class ChatConverter
         // the chat does not contain any messages.
         await using var messageExporter = new MessageExporter(context);
 
-        for (var i = 0; i < chat.Messages.Count; i++)
+        try
         {
-            var message = chat.Messages[i];
+            for (var i = 0; i < chat.Messages.Count; i++)
+            {
+                var message = chat.Messages[i];
 
-            if (request.MessageFilter.IsMatch(message))
-                await messageExporter.ExportMessageAsync(message, cancellationToken);
+                if (request.MessageFilter.IsMatch(message))
+                    await messageExporter.ExportMessageAsync(message, cancellationToken);
 
-            progress?.Report(Percentage.FromFraction((i + 1.0) / chat.Messages.Count));
+                progress?.Report(Percentage.FromFraction((i + 1.0) / chat.Messages.Count));
+            }
+        }
+        catch
+        {
+            // The output is always fully regenerable from the source chat, so the repaired
+            // partial is allowed to overwrite whatever (possibly complete, now-stale) output
+            // exists from a previous run -- a future run just reconverts the rest.
+            messageExporter.Abandon(allowOverwrite: true);
+            throw;
         }
     }
 
@@ -53,20 +64,28 @@ public class ChatConverter
 
         await using var messageExporter = new MessageExporter(context);
 
-        for (var fileIndex = 0; fileIndex < chatProviders.Count; fileIndex++)
+        try
         {
-            var chat =
-                fileIndex == 0 ? firstChat : await chatProviders[fileIndex](cancellationToken);
-
-            for (var i = 0; i < chat.Messages.Count; i++)
+            for (var fileIndex = 0; fileIndex < chatProviders.Count; fileIndex++)
             {
-                var message = chat.Messages[i];
+                var chat =
+                    fileIndex == 0 ? firstChat : await chatProviders[fileIndex](cancellationToken);
 
-                if (request.MessageFilter.IsMatch(message))
-                    await messageExporter.ExportMessageAsync(message, cancellationToken);
+                for (var i = 0; i < chat.Messages.Count; i++)
+                {
+                    var message = chat.Messages[i];
+
+                    if (request.MessageFilter.IsMatch(message))
+                        await messageExporter.ExportMessageAsync(message, cancellationToken);
+                }
+
+                progress?.Report(Percentage.FromFraction((fileIndex + 1.0) / chatProviders.Count));
             }
-
-            progress?.Report(Percentage.FromFraction((fileIndex + 1.0) / chatProviders.Count));
+        }
+        catch
+        {
+            messageExporter.Abandon(allowOverwrite: true);
+            throw;
         }
     }
 
@@ -111,28 +130,41 @@ public class ChatConverter
         var context = new ExportContext(null, request, members, roles);
         await using var messageExporter = new MessageExporter(context);
 
-        var messagesProcessed = 0;
-        foreach (var (filePath, fileCount) in filesMetadata)
+        try
         {
-            var rebaseLocalAssetPath = getRebaseLocalAssetPath(filePath);
-
-            await foreach (
-                var messageJson in ExportedChatParser.StreamMessagesAsync(
-                    filePath,
-                    cancellationToken
-                )
-            )
+            var messagesProcessed = 0;
+            foreach (var (filePath, fileCount) in filesMetadata)
             {
-                var message = ExportedMessageParser.ParseMessage(messageJson, rebaseLocalAssetPath);
+                var rebaseLocalAssetPath = getRebaseLocalAssetPath(filePath);
 
-                if (request.MessageFilter.IsMatch(message))
-                    await messageExporter.ExportMessageAsync(message, cancellationToken);
+                await foreach (
+                    var messageJson in ExportedChatParser.StreamMessagesAsync(
+                        filePath,
+                        cancellationToken
+                    )
+                )
+                {
+                    var message = ExportedMessageParser.ParseMessage(
+                        messageJson,
+                        rebaseLocalAssetPath
+                    );
 
-                messagesProcessed++;
-                progress?.Report(
-                    Percentage.FromFraction((double)messagesProcessed / Math.Max(1, totalMessages))
-                );
+                    if (request.MessageFilter.IsMatch(message))
+                        await messageExporter.ExportMessageAsync(message, cancellationToken);
+
+                    messagesProcessed++;
+                    progress?.Report(
+                        Percentage.FromFraction(
+                            (double)messagesProcessed / Math.Max(1, totalMessages)
+                        )
+                    );
+                }
             }
+        }
+        catch
+        {
+            messageExporter.Abandon(allowOverwrite: true);
+            throw;
         }
     }
 }
