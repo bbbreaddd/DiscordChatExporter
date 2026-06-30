@@ -108,6 +108,9 @@ internal partial class ExportAssetDownloader(
 
                     await using var output = File.Create(filePath);
                     await response.Content.CopyToAsync(output, innerCancellationToken);
+
+                    if (output.Length <= 0)
+                        throw new HttpRequestException("Downloaded asset is empty.");
                 },
                 cancellationToken
             );
