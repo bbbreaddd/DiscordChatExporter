@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -19,7 +20,23 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
     private bool _abandoned;
     private bool _abandonOverwrite;
 
+    // Checkpoints captured from a JsonMessageWriter (see JsonMessageWriter.Checkpoints), keyed by
+    // partition index, for the caller to persist into a MessageIndex once a partition finalizes.
+    // Only ever populated on the normal (non-abandoned) finalize path -- an abandoned partition
+    // gets truncated by crash-recovery repair, which would invalidate any checkpoint past the
+    // truncation point, so it's simplest and safest to just not record any for that partition
+    // (the index is purely an optimization; missing entries just mean a slower lookup later).
+    private readonly Dictionary<
+        int,
+        IReadOnlyList<(string MessageId, long ByteOffset)>
+    > _checkpointsByPartition = [];
+
     public long MessagesExported { get; private set; }
+
+    public IReadOnlyDictionary<
+        int,
+        IReadOnlyList<(string MessageId, long ByteOffset)>
+    > CheckpointsByPartition => _checkpointsByPartition;
 
     // Marks the in-progress partition as aborted rather than complete. Call this from a 'catch'
     // around ExportMessageAsync before rethrowing, so disposal (whether from a normal 'await
@@ -118,6 +135,8 @@ internal partial class MessageExporter(ExportContext context, string? outputFile
             {
                 if (_writer is HtmlMessageWriter htmlWriter)
                     _htmlPageFeaturesByPartition.Add(htmlWriter.PageFeatures);
+                else if (_writer is JsonMessageWriter jsonWriter)
+                    _checkpointsByPartition[_partitionIndex] = jsonWriter.Checkpoints;
 
                 await _writer.WritePostambleAsync(cancellationToken);
             }

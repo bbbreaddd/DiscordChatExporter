@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -267,7 +268,9 @@ internal static class IncrementalJsonAppender
         await output.WriteAsync(closing, cancellationToken);
     }
 
-    private static async ValueTask CopyBytesAsync(
+    // Internal (rather than private) so MessagePatcher can reuse it for its own byte-range
+    // splicing, instead of duplicating the same chunked-copy loop.
+    internal static async ValueTask CopyBytesAsync(
         Stream source,
         Stream destination,
         long length,
@@ -303,6 +306,151 @@ internal static class IncrementalJsonAppender
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Builds a <see cref="PartitionIndexEntry"/> for a partition file that doesn't have a
+    /// persisted index yet (e.g. one written before this feature existed, or one whose index
+    /// couldn't be incrementally maintained -- see <see cref="BuildMergedCheckpoints"/>), by
+    /// scanning it once from the start. O(file size), but only ever needs to run once per
+    /// partition: the result is meant to be persisted so every future lookup is fast.
+    /// </summary>
+    /// <remarks>
+    /// Must sample checkpoints at the same interval <see cref="JsonMessageWriter"/> does (message
+    /// #1, #501, #1001, ...) so that an index built this way for old content and one maintained
+    /// incrementally for new content line up the same way if a channel ever mixes the two.
+    /// </remarks>
+    public static PartitionIndexEntry? TryBuildIndexForPartition(
+        string partitionFilePath,
+        int partitionIndex
+    )
+    {
+        try
+        {
+            return ScanIndexForPartition(
+                partitionFilePath,
+                FindMessagesArrayOpenOffset(partitionFilePath),
+                partitionIndex
+            );
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private const int IndexCheckpointInterval = 500;
+
+    private static PartitionIndexEntry? ScanIndexForPartition(
+        string filePath,
+        long arrayOpenOffset,
+        int partitionIndex
+    )
+    {
+        using var stream = File.OpenRead(filePath);
+        stream.Seek(arrayOpenOffset, SeekOrigin.Begin); // positioned at '['
+
+        var buffer = new byte[64 * 1024];
+        var dataLength = 0;
+        var windowBase = arrayOpenOffset;
+        var state = new JsonReaderState();
+
+        var started = false;
+        var capturingId = false;
+        var currentObjectStart = 0L;
+        var messageCount = 0L;
+        string? firstMessageId = null;
+        string? lastMessageId = null;
+        var checkpoints = new List<CheckpointEntry>();
+
+        while (true)
+        {
+            var read = stream.Read(buffer, dataLength, buffer.Length - dataLength);
+            var isFinalBlock = read == 0;
+            dataLength += read;
+
+            var reader = new Utf8JsonReader(buffer.AsSpan(0, dataLength), isFinalBlock, state);
+            var reachedEnd = false;
+
+            try
+            {
+                while (reader.Read())
+                {
+                    if (!started)
+                    {
+                        if (reader.TokenType == JsonTokenType.StartArray)
+                            started = true;
+                        continue;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.StartObject && reader.CurrentDepth == 1)
+                    {
+                        currentObjectStart = windowBase + reader.TokenStartIndex;
+                    }
+                    else if (
+                        reader.TokenType == JsonTokenType.PropertyName
+                        && reader.CurrentDepth == 2
+                        && reader.ValueTextEquals("id"u8)
+                    )
+                    {
+                        capturingId = true;
+                    }
+                    else if (capturingId && reader.TokenType == JsonTokenType.String)
+                    {
+                        capturingId = false;
+                        var messageId = reader.GetString()!;
+                        messageCount++;
+                        firstMessageId ??= messageId;
+                        lastMessageId = messageId;
+
+                        if (messageCount % IndexCheckpointInterval == 1)
+                            checkpoints.Add(
+                                new CheckpointEntry
+                                {
+                                    MessageId = messageId,
+                                    ByteOffset = currentObjectStart,
+                                }
+                            );
+                    }
+                    else if (reader.TokenType == JsonTokenType.EndArray && reader.CurrentDepth == 0)
+                    {
+                        reachedEnd = true;
+                        break;
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Truncated file (e.g. a leftover from a crash that hasn't been repaired yet) --
+                // stop with whatever was fully read so far rather than fail the whole build.
+                break;
+            }
+
+            if (reachedEnd || isFinalBlock)
+                break;
+
+            var consumed = (int)reader.BytesConsumed;
+            state = reader.CurrentState;
+            windowBase += consumed;
+            var leftover = dataLength - consumed;
+            if (leftover > 0)
+                Buffer.BlockCopy(buffer, consumed, buffer, 0, leftover);
+            dataLength = leftover;
+
+            if (dataLength == buffer.Length)
+                Array.Resize(ref buffer, buffer.Length * 2);
+        }
+
+        if (firstMessageId is null || lastMessageId is null)
+            return null;
+
+        return new PartitionIndexEntry
+        {
+            Index = partitionIndex,
+            MinMessageId = firstMessageId,
+            MaxMessageId = lastMessageId,
+            Checkpoints = checkpoints,
+        };
     }
 
     private static string? ScanLastMessageId(string filePath, long arrayOpenOffset)
@@ -385,5 +533,88 @@ internal static class IncrementalJsonAppender
             if (dataLength == buffer.Length)
                 Array.Resize(ref buffer, buffer.Length * 2);
         }
+    }
+
+    /// <summary>
+    /// Computes the merged, offset-adjusted set of index checkpoints for a partition after a
+    /// <see cref="MergeAsync"/> call, given the persisted checkpoints for the existing content
+    /// (if any) and the raw checkpoints captured while writing <paramref name="newTempFilePath"/>
+    /// (relative to that file's own start, from <c>JsonMessageWriter.Checkpoints</c>). Mirrors
+    /// the exact same byte-position arithmetic <see cref="MergeAsync"/> uses to combine the two
+    /// files, so a checkpoint recorded during either half lands at the correct offset in the
+    /// resulting merged file. Does not read or write message content -- call this alongside (not
+    /// instead of) <see cref="MergeAsync"/>.
+    /// </summary>
+    /// <returns>
+    /// The merged index entry, or <see langword="null"/> if the existing content has no
+    /// persisted index to build on (the caller should leave the index alone in that case; a
+    /// lazy full rebuild -- triggered on the next patch attempt -- will cover the whole
+    /// partition, old and new content alike, rather than risk an index with an inaccurate
+    /// minimum message id for content it never saw).
+    /// </returns>
+    public static PartitionIndexEntry? BuildMergedCheckpoints(
+        string existingFilePath,
+        string newTempFilePath,
+        PartitionIndexEntry? existingIndexEntry,
+        int partitionIndex,
+        IReadOnlyList<(string MessageId, long ByteOffset)> newCheckpoints,
+        string? newMaxMessageId
+    )
+    {
+        var (existingMsgOpenPos, existingMsgClosePos, existingCount) = FindMessagesContent(
+            existingFilePath
+        );
+
+        if (existingCount > 0 && existingIndexEntry is null)
+            return null;
+
+        var (newMsgOpenPos, _, newCount) = FindMessagesContent(newTempFilePath);
+        if (newCount <= 0)
+            return existingIndexEntry;
+
+        var existingContentStartInMerged = newMsgOpenPos + 1;
+        var existingContentLength =
+            existingCount > 0 ? existingMsgClosePos - existingMsgOpenPos - 1 : 0;
+        var newContentStartInMerged =
+            existingContentStartInMerged + existingContentLength + (existingCount > 0 ? 1 : 0);
+        var deltaNew = newContentStartInMerged - (newMsgOpenPos + 1);
+
+        var mergedCheckpoints = new List<CheckpointEntry>();
+
+        if (existingIndexEntry is not null)
+        {
+            var deltaExisting = existingContentStartInMerged - (existingMsgOpenPos + 1);
+            foreach (var checkpoint in existingIndexEntry.Checkpoints)
+            {
+                mergedCheckpoints.Add(
+                    new CheckpointEntry
+                    {
+                        MessageId = checkpoint.MessageId,
+                        ByteOffset = checkpoint.ByteOffset + deltaExisting,
+                    }
+                );
+            }
+        }
+
+        foreach (var (messageId, byteOffset) in newCheckpoints)
+        {
+            mergedCheckpoints.Add(
+                new CheckpointEntry { MessageId = messageId, ByteOffset = byteOffset + deltaNew }
+            );
+        }
+
+        var minMessageId = existingIndexEntry?.MinMessageId;
+        if (string.IsNullOrEmpty(minMessageId))
+            minMessageId = newCheckpoints.Count > 0 ? newCheckpoints[0].MessageId : "";
+
+        var maxMessageId = newMaxMessageId ?? existingIndexEntry?.MaxMessageId ?? "";
+
+        return new PartitionIndexEntry
+        {
+            Index = partitionIndex,
+            MinMessageId = minMessageId,
+            MaxMessageId = maxMessageId,
+            Checkpoints = mergedCheckpoints,
+        };
     }
 }

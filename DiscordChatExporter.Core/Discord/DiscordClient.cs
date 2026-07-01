@@ -649,6 +649,24 @@ public class DiscordClient
         return Channel.Parse(response.Value, parent);
     }
 
+    // Fetches a single message directly by id, without paginating through the channel's history.
+    // Used to refresh one already-exported message's current state (e.g. after a reaction
+    // changes) instead of a full re-export. Returns null if the message (or channel) no longer
+    // exists or isn't accessible -- callers treat that as "nothing to update", not an error.
+    public async ValueTask<Message?> TryGetMessageAsync(
+        Snowflake channelId,
+        Snowflake messageId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var response = await TryGetJsonResponseAsync(
+            $"channels/{channelId}/messages/{messageId}",
+            cancellationToken
+        );
+
+        return response?.Pipe(Message.Parse);
+    }
+
     public async IAsyncEnumerable<Channel> GetChannelThreadsAsync(
         IReadOnlyList<Channel> channels,
         bool includeArchived = false,

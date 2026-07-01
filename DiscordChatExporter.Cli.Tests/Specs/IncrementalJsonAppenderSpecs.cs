@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -265,5 +266,123 @@ public class IncrementalJsonAppenderSpecs
         fileBytes[arrayOpenOffset].Should().Be((byte)'[');
 
         lastMessageId.Should().Be("101");
+    }
+
+    // Independently finds the byte offset of a message's own '{' (the same position
+    // JsonMessageWriter's checkpoint capture records), using a fresh Utf8JsonReader pass rather
+    // than any of the production code being tested here -- so this is ground truth, not a
+    // circular check. Reads from the file's actual root (unlike the production scanners, which
+    // seek past the header first), so message objects sit one level deeper: depth 2 for the
+    // object itself, depth 3 for its own "id" property.
+    private static long FindMessageStartOffset(string filePath, string messageId)
+    {
+        var bytes = File.ReadAllBytes(filePath);
+        var reader = new Utf8JsonReader(bytes);
+
+        long? currentObjectStart = null;
+        while (reader.Read())
+        {
+            if (reader.TokenType == JsonTokenType.StartObject && reader.CurrentDepth == 2)
+                currentObjectStart = reader.TokenStartIndex;
+
+            if (
+                reader.TokenType == JsonTokenType.PropertyName
+                && reader.CurrentDepth == 3
+                && reader.ValueTextEquals("id"u8)
+            )
+            {
+                reader.Read();
+                if (reader.GetString() == messageId)
+                    return currentObjectStart!.Value;
+            }
+        }
+
+        throw new InvalidOperationException($"Message '{messageId}' not found in '{filePath}'.");
+    }
+
+    [Fact]
+    public async Task Merged_checkpoints_land_at_the_correct_byte_offset_in_the_merged_file()
+    {
+        // Arrange: an "existing" partition with a persisted checkpoint at message 100, and a
+        // "new" temp file (simulating a streaming-append fetch) with its own checkpoint at 200,
+        // captured relative to that file's own start (as JsonMessageWriter would).
+        using var existingFile = TempFile.Create();
+        using var newTempFile = TempFile.Create();
+        using var mergedFile = TempFile.Create();
+
+        var existingJson = BuildExportJson(
+            "Guild",
+            "channel",
+            "Category",
+            "555",
+            ("100", "msg 100"),
+            ("101", "msg 101")
+        );
+        await File.WriteAllTextAsync(existingFile.Path, existingJson);
+
+        var newJson = BuildExportJson(
+            "Guild",
+            "channel",
+            "Category",
+            "555",
+            ("200", "msg 200"),
+            ("201", "msg 201")
+        );
+        await File.WriteAllTextAsync(newTempFile.Path, newJson);
+
+        var existingCheckpointOffset = FindMessageStartOffset(existingFile.Path, "100");
+        var newCheckpointOffset = FindMessageStartOffset(newTempFile.Path, "200");
+
+        var existingIndexEntry = new PartitionIndexEntry
+        {
+            Index = 0,
+            MinMessageId = "100",
+            MaxMessageId = "101",
+            Checkpoints =
+            [
+                new CheckpointEntry { MessageId = "100", ByteOffset = existingCheckpointOffset },
+            ],
+        };
+
+        // Act
+        await IncrementalJsonAppender.MergeAsync(
+            existingFile.Path,
+            newTempFile.Path,
+            mergedFile.Path
+        );
+
+        var merged = IncrementalJsonAppender.BuildMergedCheckpoints(
+            existingFile.Path,
+            newTempFile.Path,
+            existingIndexEntry,
+            partitionIndex: 0,
+            newCheckpoints: [("200", newCheckpointOffset)],
+            newMaxMessageId: "201"
+        );
+
+        // Assert
+        merged.Should().NotBeNull();
+        merged!.MinMessageId.Should().Be("100");
+        merged.MaxMessageId.Should().Be("201");
+        merged.Checkpoints.Should().HaveCount(2);
+
+        // The real, independent test: seek to each computed offset in the *actual merged file*
+        // and confirm it lands exactly on the expected message's own '{'.
+        var mergedBytes = await File.ReadAllBytesAsync(mergedFile.Path);
+        foreach (var checkpoint in merged.Checkpoints)
+        {
+            mergedBytes[checkpoint.ByteOffset]
+                .Should()
+                .Be(
+                    (byte)'{',
+                    $"checkpoint for message {checkpoint.MessageId} should point at '{{'"
+                );
+
+            var reader = new Utf8JsonReader(mergedBytes.AsSpan((int)checkpoint.ByteOffset));
+            reader.Read(); // StartObject
+            reader.Read(); // PropertyName "id"
+            reader.Read(); // the id's string value
+            reader.GetString().Should().Be(checkpoint.MessageId);
+        }
     }
 }

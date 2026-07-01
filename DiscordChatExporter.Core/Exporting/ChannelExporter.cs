@@ -194,58 +194,65 @@ public class ChannelExporter(DiscordClient discord)
             // by freeing space and re-running; deleting it would force a full re-fetch.
             var mergeCompleted = false;
 
+            // Not an 'await using' local -- CheckpointsByPartition is only fully populated once
+            // DisposeAsync finalizes the last partition, and the merge/index-update logic below
+            // needs to read it afterward, so the variable has to outlive the disposal itself
+            // (disposal is still guaranteed via the explicit try/finally right below).
+            var messageExporter = new MessageExporter(context, appendTempPath);
+
             try
             {
                 try
                 {
-                    await using (var messageExporter = new MessageExporter(context, appendTempPath))
+                    try
                     {
-                        try
+                        await foreach (var message in messages)
                         {
-                            await foreach (var message in messages)
+                            try
                             {
-                                try
-                                {
-                                    foreach (var user in message.GetReferencedUsers())
-                                        await context.PopulateMemberAsync(user, cancellationToken);
+                                foreach (var user in message.GetReferencedUsers())
+                                    await context.PopulateMemberAsync(user, cancellationToken);
 
-                                    if (request.MessageFilter.IsMatch(message))
-                                    {
-                                        await messageExporter.ExportMessageAsync(
-                                            message,
-                                            cancellationToken
-                                        );
-                                        newMessageCount++;
-                                        if (
-                                            newMaxMessageId is null
-                                            || message.Id > newMaxMessageId.Value
-                                        )
-                                            newMaxMessageId = message.Id;
-                                    }
-                                }
-                                catch (Exception ex)
+                                if (request.MessageFilter.IsMatch(message))
                                 {
-                                    throw new DiscordChatExporterException(
-                                        $"Failed to export message #{message.Id} "
-                                            + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
-                                            + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                                        ex is not DiscordChatExporterException dex || dex.IsFatal,
-                                        ex
+                                    await messageExporter.ExportMessageAsync(
+                                        message,
+                                        cancellationToken
                                     );
+                                    newMessageCount++;
+                                    if (
+                                        newMaxMessageId is null
+                                        || message.Id > newMaxMessageId.Value
+                                    )
+                                        newMaxMessageId = message.Id;
                                 }
                             }
+                            catch (Exception ex)
+                            {
+                                throw new DiscordChatExporterException(
+                                    $"Failed to export message #{message.Id} "
+                                        + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                                        + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                    ex
+                                );
+                            }
                         }
-                        catch
-                        {
-                            // appendTempPath is always scratch (never pre-existing precious
-                            // data), so leave the default (don't force-overwrite) -- repair
-                            // truncates to the last complete message and promotes it if nothing
-                            // else is in the way; otherwise the bare .tmp is left for crash
-                            // recovery to pick up next run, same as it already does for a real
-                            // kill at this exact point.
-                            messageExporter.Abandon();
-                            throw;
-                        }
+                    }
+                    catch
+                    {
+                        // appendTempPath is always scratch (never pre-existing precious
+                        // data), so leave the default (don't force-overwrite) -- repair
+                        // truncates to the last complete message and promotes it if nothing
+                        // else is in the way; otherwise the bare .tmp is left for crash
+                        // recovery to pick up next run, same as it already does for a real
+                        // kill at this exact point.
+                        messageExporter.Abandon();
+                        throw;
+                    }
+                    finally
+                    {
+                        await messageExporter.DisposeAsync();
                     }
                     isStreamingAppendCompletedSuccessfully = true;
                 }
@@ -269,6 +276,56 @@ public class ChannelExporter(DiscordClient discord)
                         File.Move(mergedTempPath, mergeTargetPath, overwrite: true);
                         mergeCompleted = true;
 
+                        // Best-effort: keep the per-channel message index (used to patch old
+                        // messages -- e.g. reaction updates -- without a full rescan) up to date
+                        // with the batch just merged in. Never lets an index problem fail the
+                        // export itself; a missing/stale entry just means a slower lookup (or a
+                        // one-time lazy rebuild) the next time something tries to patch this
+                        // channel, not lost or corrupted data.
+                        try
+                        {
+                            var indexFilePath = MessageIndex.GetIndexFilePath(
+                                request.OutputFilePath
+                            );
+                            var index = await MessageIndex.LoadAsync(indexFilePath);
+                            var targetPartitionIndex = existingPartitionPaths.Length - 1;
+                            var existingEntry = index.Partitions.Find(p =>
+                                p.Index == targetPartitionIndex
+                            );
+
+                            var primaryCheckpoints =
+                                messageExporter.CheckpointsByPartition.GetValueOrDefault(
+                                    0,
+                                    Array.Empty<(string MessageId, long ByteOffset)>()
+                                );
+
+                            var mergedEntry = IncrementalJsonAppender.BuildMergedCheckpoints(
+                                mergeTargetPath,
+                                appendTempPath,
+                                existingEntry,
+                                targetPartitionIndex,
+                                primaryCheckpoints,
+                                newMaxMessageId?.ToString()
+                            );
+
+                            if (mergedEntry is not null)
+                            {
+                                index.Partitions.RemoveAll(p => p.Index == targetPartitionIndex);
+                                index.Partitions.Add(mergedEntry);
+                            }
+
+                            if (await index.SaveAsync(indexFilePath) is { } saveEx)
+                                Console.Error.WriteLine(
+                                    $"Failed to save message index: {saveEx.Message}"
+                                );
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine(
+                                $"Failed to update message index (will rebuild on next patch attempt): {ex.Message}"
+                            );
+                        }
+
                         // If the newly-fetched messages alone exceeded the partition limit, the
                         // writer above already split them into further temp partitions
                         // (appendTempPath, appendTempPath " [part 2]", ...). Only the first one
@@ -289,6 +346,52 @@ public class ChannelExporter(DiscordClient discord)
                                 nextPartitionIndex
                             );
                             File.Move(overflowTempPath, newPartitionPath, overwrite: false);
+
+                            // These are moved as complete, standalone files (not byte-spliced),
+                            // so their checkpoints are already valid as-is -- no offset
+                            // adjustment needed, unlike the primary merge above.
+                            try
+                            {
+                                var overflowCheckpoints =
+                                    messageExporter.CheckpointsByPartition.GetValueOrDefault(
+                                        i,
+                                        Array.Empty<(string MessageId, long ByteOffset)>()
+                                    );
+                                if (overflowCheckpoints.Count > 0)
+                                {
+                                    var indexFilePath = MessageIndex.GetIndexFilePath(
+                                        request.OutputFilePath
+                                    );
+                                    var index = await MessageIndex.LoadAsync(indexFilePath);
+                                    index.Partitions.RemoveAll(p => p.Index == nextPartitionIndex);
+                                    index.Partitions.Add(
+                                        new PartitionIndexEntry
+                                        {
+                                            Index = nextPartitionIndex,
+                                            MinMessageId = overflowCheckpoints[0].MessageId,
+                                            MaxMessageId =
+                                                IncrementalJsonAppender.TryGetLastMessageId(
+                                                    newPartitionPath
+                                                ) ?? overflowCheckpoints[^1].MessageId,
+                                            Checkpoints = overflowCheckpoints
+                                                .Select(c => new CheckpointEntry
+                                                {
+                                                    MessageId = c.MessageId,
+                                                    ByteOffset = c.ByteOffset,
+                                                })
+                                                .ToList(),
+                                        }
+                                    );
+                                    _ = await index.SaveAsync(indexFilePath);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.Error.WriteLine(
+                                    $"Failed to update message index for overflow partition (will rebuild on next patch attempt): {ex.Message}"
+                                );
+                            }
+
                             nextPartitionIndex++;
                         }
                     }
@@ -446,9 +549,15 @@ public class ChannelExporter(DiscordClient discord)
         Snowflake? maxMessageId = null;
         var isFreshExportCompletedSuccessfully = false;
 
+        // Not an 'await using' local, for the same reason as the streaming-append path above:
+        // CheckpointsByPartition needs to be read after DisposeAsync finalizes the last
+        // partition, once this whole export (a from-scratch rewrite, unlike the streaming-append
+        // path) has produced its complete, final set of partitions.
+        var freshExporter = new MessageExporter(freshContext);
+
         try
         {
-            await using (var freshExporter = new MessageExporter(freshContext))
+            try
             {
                 try
                 {
@@ -529,7 +638,60 @@ public class ChannelExporter(DiscordClient discord)
                     throw;
                 }
             }
+            finally
+            {
+                await freshExporter.DisposeAsync();
+            }
             isFreshExportCompletedSuccessfully = true;
+
+            // Fresh/legacy exports always (re)write every partition from scratch in one pass, so
+            // -- unlike the streaming-append path -- there's no byte-level merge or offset
+            // adjustment to do: the writer's own checkpoints are already correct for the final
+            // file as-is. Best-effort, same as the streaming-append path's index update: never
+            // lets an index problem fail the export itself.
+            try
+            {
+                var indexFilePath = MessageIndex.GetIndexFilePath(request.OutputFilePath);
+                var index = new MessageIndex();
+
+                foreach (var (partitionIndex, checkpoints) in freshExporter.CheckpointsByPartition)
+                {
+                    if (checkpoints.Count <= 0)
+                        continue;
+
+                    var partitionPath = MessageExporter.GetPartitionFilePath(
+                        request.OutputFilePath,
+                        partitionIndex
+                    );
+
+                    index.Partitions.Add(
+                        new PartitionIndexEntry
+                        {
+                            Index = partitionIndex,
+                            MinMessageId = checkpoints[0].MessageId,
+                            MaxMessageId =
+                                IncrementalJsonAppender.TryGetLastMessageId(partitionPath)
+                                ?? checkpoints[^1].MessageId,
+                            Checkpoints = checkpoints
+                                .Select(c => new CheckpointEntry
+                                {
+                                    MessageId = c.MessageId,
+                                    ByteOffset = c.ByteOffset,
+                                })
+                                .ToList(),
+                        }
+                    );
+                }
+
+                if (await index.SaveAsync(indexFilePath) is { } saveEx)
+                    Console.Error.WriteLine($"Failed to save message index: {saveEx.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"Failed to update message index (will rebuild on next patch attempt): {ex.Message}"
+                );
+            }
         }
         finally
         {

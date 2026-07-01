@@ -30,6 +30,16 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
         }
     );
 
+    // Every Nth message's id and byte offset, sampled as messages are written, so a later patch
+    // (e.g. to reflect a new reaction on an old message) can seek close to it instead of
+    // scanning the whole partition from the start. BytesCommitted + BytesPending gives the
+    // writer's own logical position without forcing a flush -- it's accurate regardless of
+    // whatever internal buffering the underlying stream itself does.
+    private const int CheckpointInterval = 500;
+    private readonly List<(string MessageId, long ByteOffset)> _checkpoints = [];
+
+    public IReadOnlyList<(string MessageId, long ByteOffset)> Checkpoints => _checkpoints;
+
     private async ValueTask<string> FormatMarkdownAsync(
         string markdown,
         CancellationToken cancellationToken = default
@@ -472,6 +482,13 @@ internal class JsonMessageWriter(Stream stream, ExportContext context)
     )
     {
         await base.WriteMessageAsync(message, cancellationToken);
+
+        if (MessagesWritten % CheckpointInterval == 1)
+        {
+            _checkpoints.Add(
+                (message.Id.ToString(), _writer.BytesCommitted + _writer.BytesPending)
+            );
+        }
 
         _writer.WriteStartObject();
 
