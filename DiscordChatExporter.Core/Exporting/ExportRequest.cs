@@ -73,6 +73,8 @@ public partial class ExportRequest
 
     public bool IsCompact { get; }
 
+    public bool ForceFullScan { get; }
+
     public ExportRequest(
         Guild guild,
         Channel channel,
@@ -93,7 +95,8 @@ public partial class ExportRequest
         bool shouldCacheAssetsOnly = false,
         bool isOfflineAssetMode = false,
         bool shouldUseHtmlSharedAssets = false,
-        bool isCompact = false
+        bool isCompact = false,
+        bool forceFullScan = false
     )
     {
         Guild = guild;
@@ -114,6 +117,7 @@ public partial class ExportRequest
         IsIncremental = isIncremental;
         ShouldUseHtmlSharedAssets = shouldUseHtmlSharedAssets;
         IsCompact = isCompact;
+        ForceFullScan = forceFullScan;
 
         BaseOutputDirPath =
             Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)

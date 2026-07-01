@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using CliFx;
 using CliFx.Binding;
@@ -63,44 +64,66 @@ public partial class SyncGuildCommand : DiscordCommandBase
 
         await using var store = await SqliteExportStore.OpenAsync(OutputPath, cancellationToken);
 
-        await store.UpsertGuildAsync(guild, cancellationToken);
-
-        var roleCount = 0;
-        await foreach (var role in Discord.GetGuildRolesAsync(GuildId, cancellationToken))
-        {
-            await store.UpsertRoleAsync(role, GuildId, cancellationToken);
-            roleCount++;
-        }
-
-        var emojiCount = 0;
-        await foreach (var emoji in Discord.GetGuildEmojisAsync(GuildId, cancellationToken))
-        {
-            await store.UpsertGuildEmojiAsync(emoji, GuildId, cancellationToken);
-            emojiCount++;
-        }
-
-        var stickerCount = 0;
-        await foreach (var sticker in Discord.GetGuildStickersAsync(GuildId, cancellationToken))
-        {
-            await store.UpsertGuildStickerAsync(sticker, GuildId, cancellationToken);
-            stickerCount++;
-        }
-
-        var scheduledEventCount = 0;
-        await foreach (
-            var scheduledEvent in Discord.GetGuildScheduledEventsAsync(GuildId, cancellationToken)
-        )
-        {
-            await store.UpsertScheduledEventAsync(scheduledEvent, GuildId, cancellationToken);
-            scheduledEventCount++;
-        }
-
-        await store.FlushAsync(cancellationToken);
+        var (roleCount, emojiCount, stickerCount, scheduledEventCount) = await SyncGuildAsync(
+            Discord,
+            store,
+            GuildId,
+            cancellationToken
+        );
 
         await console.Output.WriteLineAsync(
             $"Synced guild '{guild.Name}' (#{guild.Id}): "
                 + $"{roleCount} role(s), {emojiCount} emoji, {stickerCount} sticker(s), "
                 + $"{scheduledEventCount} scheduled event(s)."
         );
+    }
+
+    public static async ValueTask<(
+        int roleCount,
+        int emojiCount,
+        int stickerCount,
+        int scheduledEventCount
+    )> SyncGuildAsync(
+        DiscordClient discord,
+        SqliteExportStore store,
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var guild = await discord.GetGuildAsync(guildId, cancellationToken);
+        await store.UpsertGuildAsync(guild, cancellationToken);
+
+        var roleCount = 0;
+        await foreach (var role in discord.GetGuildRolesAsync(guildId, cancellationToken))
+        {
+            await store.UpsertRoleAsync(role, guildId, cancellationToken);
+            roleCount++;
+        }
+
+        var emojiCount = 0;
+        await foreach (var emoji in discord.GetGuildEmojisAsync(guildId, cancellationToken))
+        {
+            await store.UpsertGuildEmojiAsync(emoji, guildId, cancellationToken);
+            emojiCount++;
+        }
+
+        var stickerCount = 0;
+        await foreach (var sticker in discord.GetGuildStickersAsync(guildId, cancellationToken))
+        {
+            await store.UpsertGuildStickerAsync(sticker, guildId, cancellationToken);
+            stickerCount++;
+        }
+
+        var scheduledEventCount = 0;
+        await foreach (
+            var scheduledEvent in discord.GetGuildScheduledEventsAsync(guildId, cancellationToken)
+        )
+        {
+            await store.UpsertScheduledEventAsync(scheduledEvent, guildId, cancellationToken);
+            scheduledEventCount++;
+        }
+
+        await store.FlushAsync(cancellationToken);
+        return (roleCount, emojiCount, stickerCount, scheduledEventCount);
     }
 }

@@ -32,6 +32,22 @@ public static class DatabaseMessagePatcher
             );
         }
 
+        await using var store = await SqliteExportStore.OpenAsync(
+            databaseFilePath,
+            cancellationToken
+        );
+
+        return await PatchMessageAsync(request, discord, store, messageId, cancellationToken);
+    }
+
+    public static async ValueTask<MessagePatchResult> PatchMessageAsync(
+        ExportRequest request,
+        DiscordClient discord,
+        SqliteExportStore store,
+        Snowflake messageId,
+        CancellationToken cancellationToken = default
+    )
+    {
         var message = await discord.TryGetMessageAsync(
             request.Channel.Id,
             messageId,
@@ -39,11 +55,6 @@ public static class DatabaseMessagePatcher
         );
         if (message is null)
             return new MessagePatchResult(false, "Message no longer exists (deleted).");
-
-        await using var store = await SqliteExportStore.OpenAsync(
-            databaseFilePath,
-            cancellationToken
-        );
 
         await store.UpsertGuildAsync(request.Guild, cancellationToken);
         await store.UpsertChannelAsync(request.Channel, cancellationToken);

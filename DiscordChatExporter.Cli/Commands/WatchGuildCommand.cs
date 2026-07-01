@@ -1,0 +1,817 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using CliFx;
+using CliFx.Binding;
+using CliFx.Infrastructure;
+using DiscordChatExporter.Cli.Commands.Base;
+using DiscordChatExporter.Cli.Commands.Shared;
+using DiscordChatExporter.Cli.Utils.Extensions;
+using DiscordChatExporter.Core.Discord;
+using DiscordChatExporter.Core.Discord.Data;
+using DiscordChatExporter.Core.Exceptions;
+using DiscordChatExporter.Core.Exporting;
+using DiscordChatExporter.Core.Exporting.Database;
+using DiscordChatExporter.Core.Exporting.Filtering;
+using DiscordChatExporter.Core.Exporting.Partitioning;
+
+namespace DiscordChatExporter.Cli.Commands;
+
+[Command(
+    "watchguild",
+    Description = "Monitors a Discord guild using the Gateway API and exports events to a database."
+)]
+public partial class WatchGuildCommand : DiscordCommandBase
+{
+    [CommandOption("guild", 'g', Description = "Server ID.")]
+    public required Snowflake GuildId { get; set; }
+
+    [CommandOption("output", 'o', Description = "Path to the SQLite database file.")]
+    public required string OutputPath
+    {
+        get;
+        set => field = Path.GetFullPath(value);
+    }
+
+    [CommandOption("format", 'f', Description = "Export format. Only 'Db' is supported.")]
+    public ExportFormat ExportFormat { get; set; } = ExportFormat.Db;
+
+    [CommandOption(
+        "catch-up",
+        Description = "Queue all guild channels/threads for export after connection."
+    )]
+    public bool CatchUp { get; set; }
+
+    [CommandOption(
+        "scan-missing",
+        Description = "Queue all guild channels/threads with a full DB rescan."
+    )]
+    public bool ScanMissing { get; set; }
+
+    private readonly Dictionary<Snowflake, HashSet<Snowflake>> _knownPinnedIds = new();
+
+    // Guards against re-running a full guild rescan on every gateway READY. A flapping
+    // connection (several non-resumable reconnects in quick succession) each raises a READY,
+    // but each rescan lists every channel/thread and re-enqueues them -- redundant within
+    // seconds of the last one (the queue dedups by channel id, so it's wasteful, not unsafe).
+    private readonly object _catchUpLock = new();
+    private DateTimeOffset _lastCatchUpAt = DateTimeOffset.MinValue;
+    private static readonly TimeSpan CatchUpMinInterval = TimeSpan.FromSeconds(60);
+
+    // Channels already known to exist in the database, so the direct-upsert path can skip the
+    // existence check (and any resolve-and-upsert of a brand-new channel) after the first message
+    // for a channel. Only ever touched from the single-threaded pump loop.
+    private readonly HashSet<Snowflake> _knownChannelIds = new();
+
+    public override async ValueTask ExecuteAsync(IConsole console)
+    {
+        await base.ExecuteAsync(console);
+
+        if (ExportFormat != ExportFormat.Db)
+            throw new CommandException("Option --format only supports 'Db' for watchguild.");
+
+        // Single-instance guard, scoped per-database. Two watchers (or a watcher plus a separate
+        // `export --format Db` run) writing to the same file would each open a writer connection;
+        // SQLite's WAL permits only one writer, so the loser blocks for busy_timeout and then
+        // fails. An exclusive OS file lock (FileShare.None -> flock on Unix) is self-releasing on
+        // process death, so unlike a bare PID file there's no staleness bookkeeping to get wrong.
+        var lockFilePath = OutputPath + ".watch.lock";
+        FileStream instanceLock;
+        try
+        {
+            instanceLock = new FileStream(
+                lockFilePath,
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None
+            );
+        }
+        catch (IOException)
+        {
+            throw new CommandException(
+                $"Another watchguild instance appears to already be running for '{OutputPath}' "
+                    + $"(lock file '{lockFilePath}' is held). Only one watcher may write to a "
+                    + "database at a time."
+            );
+        }
+
+        using var instanceLockHandle = instanceLock;
+
+        var cancellationToken = console.RegisterCancellationHandlerWithSignals();
+
+        var firstToken = Discord.Tokens[0];
+        var queue = new WatchGuildQueue();
+
+        await console.Output.WriteLineAsync(
+            $"Starting watchguild for guild {GuildId} into '{OutputPath}'..."
+        );
+
+        await using var store = await SqliteExportStore.OpenAsync(OutputPath, cancellationToken);
+
+        var gatewayClient = new GatewayClient(firstToken);
+
+        gatewayClient.LogMessage += msg =>
+        {
+            lock (console)
+            {
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway] {msg}"
+                );
+            }
+        };
+
+        gatewayClient.ErrorOccurred += ex =>
+        {
+            lock (console)
+            {
+                console.Error.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway-error] {ex.Message}"
+                );
+            }
+        };
+
+        gatewayClient.ConnectionDown += failureCount =>
+        {
+            lock (console)
+            {
+                console.Error.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway-down] Gateway has failed "
+                        + $"to (re)connect {failureCount} times in a row. Still retrying..."
+                );
+            }
+        };
+
+        gatewayClient.ConnectionRestored += failureCount =>
+        {
+            lock (console)
+            {
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway] Connection restored "
+                        + $"after {failureCount} failed attempt(s)."
+                );
+            }
+        };
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        gatewayClient.FatalCloseOccurred += () =>
+        {
+            lock (console)
+            {
+                console.Error.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway-fatal] Fatal close occurred. Stopping..."
+                );
+            }
+            cts.Cancel();
+        };
+
+        gatewayClient.DispatchReceived += (eventType, data) =>
+        {
+            try
+            {
+                if (eventType == "READY")
+                {
+                    var skipRescan = false;
+                    if (CatchUp || ScanMissing)
+                    {
+                        lock (_catchUpLock)
+                        {
+                            var nowRescan = DateTimeOffset.UtcNow;
+                            if (nowRescan - _lastCatchUpAt < CatchUpMinInterval)
+                                skipRescan = true;
+                            else
+                                _lastCatchUpAt = nowRescan;
+                        }
+
+                        if (skipRescan)
+                        {
+                            lock (console)
+                                console.Output.WriteLine(
+                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Skipping rescan -- one already started within the last {CatchUpMinInterval.TotalSeconds:F0}s."
+                                );
+                        }
+                    }
+
+                    if (CatchUp && !skipRescan)
+                    {
+                        _ = Task.Run(
+                            async () =>
+                            {
+                                try
+                                {
+                                    lock (console)
+                                        console.Output.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Listing channels and threads..."
+                                        );
+                                    var channels = new List<Channel>();
+                                    await foreach (
+                                        var ch in Discord.GetGuildChannelsAsync(GuildId, cts.Token)
+                                    )
+                                    {
+                                        if (!ch.IsCategory && ch.Kind != ChannelKind.GuildForum)
+                                            channels.Add(ch);
+                                    }
+                                    await foreach (
+                                        var th in Discord.GetGuildThreadsAsync(
+                                            GuildId,
+                                            includeArchived: true,
+                                            cancellationToken: cts.Token
+                                        )
+                                    )
+                                    {
+                                        if (th.Kind != ChannelKind.GuildForum)
+                                            channels.Add(th);
+                                    }
+                                    foreach (var ch in channels)
+                                    {
+                                        queue.EnqueueChannelExport(ch.Id, isCatchup: true);
+                                    }
+                                    lock (console)
+                                        console.Output.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued {channels.Count} channels/threads for export."
+                                        );
+                                }
+                                catch (Exception ex)
+                                {
+                                    lock (console)
+                                        console.Error.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up-error] {ex.Message}"
+                                        );
+                                }
+                            },
+                            cts.Token
+                        );
+                    }
+
+                    if (ScanMissing && !skipRescan)
+                    {
+                        _ = Task.Run(
+                            async () =>
+                            {
+                                try
+                                {
+                                    lock (console)
+                                        console.Output.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scan-missing] Listing channels and threads for full rescan..."
+                                        );
+                                    var channels = new List<Channel>();
+                                    await foreach (
+                                        var ch in Discord.GetGuildChannelsAsync(GuildId, cts.Token)
+                                    )
+                                    {
+                                        if (!ch.IsCategory && ch.Kind != ChannelKind.GuildForum)
+                                            channels.Add(ch);
+                                    }
+                                    await foreach (
+                                        var th in Discord.GetGuildThreadsAsync(
+                                            GuildId,
+                                            includeArchived: true,
+                                            cancellationToken: cts.Token
+                                        )
+                                    )
+                                    {
+                                        if (th.Kind != ChannelKind.GuildForum)
+                                            channels.Add(th);
+                                    }
+                                    foreach (var ch in channels)
+                                    {
+                                        queue.EnqueueChannelExport(ch.Id, forceFullScan: true);
+                                    }
+                                    lock (console)
+                                        console.Output.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scan-missing] Queued {channels.Count} channels/threads for full rescan."
+                                        );
+                                }
+                                catch (Exception ex)
+                                {
+                                    lock (console)
+                                        console.Error.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scan-missing-error] {ex.Message}"
+                                        );
+                                }
+                            },
+                            cts.Token
+                        );
+                    }
+                    return ValueTask.CompletedTask;
+                }
+
+                if (
+                    data.TryGetProperty("guild_id", out var gProp)
+                    && gProp.ValueKind == JsonValueKind.String
+                )
+                {
+                    if (gProp.GetString() != GuildId.ToString())
+                        return ValueTask.CompletedTask;
+                }
+                else
+                {
+                    if (eventType != "RESUMED")
+                        return ValueTask.CompletedTask;
+                }
+
+                switch (eventType)
+                {
+                    case "MESSAGE_CREATE":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var timestamp = DateTimeOffset.Parse(
+                                data.GetProperty("timestamp").GetString()!
+                            );
+
+                            // Fast path: a MESSAGE_CREATE payload is always the complete message,
+                            // so write it straight to the database now (sub-second, no Discord
+                            // round-trip). If parsing ever fails, fall through to the export below.
+                            try
+                            {
+                                var message = Message.Parse(data);
+                                queue.EnqueueMessageUpsert(channelId, message);
+                            }
+                            catch (Exception ex)
+                            {
+                                lock (console)
+                                    console.Error.WriteLine(
+                                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [dispatch-error] Failed to parse MESSAGE_CREATE payload; relying on channel export: {ex.Message}"
+                                    );
+                            }
+
+                            // Also queue the debounced channel export: it advances the stored
+                            // cursor, backfills anything missed during a gateway gap, and enriches
+                            // author roles/members that the raw gateway payload doesn't carry.
+                            queue.EnqueueChannelExport(channelId, timestamp);
+                        }
+                        break;
+
+                    case "MESSAGE_UPDATE":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var messageId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            queue.EnqueuePatch(channelId, messageId, eventType);
+                        }
+                        break;
+
+                    case "MESSAGE_DELETE":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var messageId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            queue.EnqueueDelete(channelId, messageId);
+                        }
+                        break;
+
+                    case "MESSAGE_DELETE_BULK":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var ids = data.GetProperty("ids")
+                                .EnumerateArray()
+                                .Select(x => Snowflake.Parse(x.GetString()!));
+                            queue.EnqueueDelete(channelId, ids);
+                        }
+                        break;
+
+                    case "GUILD_EMOJIS_UPDATE":
+                    case "GUILD_STICKERS_UPDATE":
+                    case "GUILD_SCHEDULED_EVENT_CREATE":
+                    case "GUILD_SCHEDULED_EVENT_UPDATE":
+                    case "GUILD_SCHEDULED_EVENT_DELETE":
+                        queue.EnqueueGuildSync(eventType);
+                        break;
+
+                    case "MESSAGE_REACTION_ADD":
+                    case "MESSAGE_REACTION_REMOVE":
+                    case "MESSAGE_REACTION_REMOVE_ALL":
+                    case "MESSAGE_REACTION_REMOVE_EMOJI":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var messageId = Snowflake.Parse(
+                                data.GetProperty("message_id").GetString()!
+                            );
+                            queue.EnqueuePatch(channelId, messageId, eventType);
+                        }
+                        break;
+
+                    case "CHANNEL_PINS_UPDATE":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            _ = Task.Run(
+                                async () =>
+                                {
+                                    try
+                                    {
+                                        var newPins = await Discord.GetPinnedMessagesAsync(
+                                            channelId,
+                                            cts.Token
+                                        );
+                                        var newPinIds = new HashSet<Snowflake>(
+                                            newPins.Select(p => p.Id)
+                                        );
+
+                                        lock (_knownPinnedIds)
+                                        {
+                                            if (
+                                                _knownPinnedIds.TryGetValue(
+                                                    channelId,
+                                                    out var oldPinIds
+                                                )
+                                            )
+                                            {
+                                                var changed = new HashSet<Snowflake>();
+                                                foreach (var id in newPinIds)
+                                                    if (!oldPinIds.Contains(id))
+                                                        changed.Add(id);
+                                                foreach (var id in oldPinIds)
+                                                    if (!newPinIds.Contains(id))
+                                                        changed.Add(id);
+
+                                                foreach (var id in changed)
+                                                    queue.EnqueuePatch(channelId, id, eventType);
+                                            }
+                                            // First pins update seen for this channel this
+                                            // session: just record the current set as the
+                                            // baseline. Refreshing every currently-pinned message
+                                            // here would be a burst of patches on channels with
+                                            // many pins (which can stall the queue); only act on
+                                            // subsequent diffs against this baseline.
+                                            _knownPinnedIds[channelId] = newPinIds;
+                                        }
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        lock (console)
+                                            console.Error.WriteLine(
+                                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-error] {ex.Message}"
+                                            );
+                                    }
+                                },
+                                cts.Token
+                            );
+                        }
+                        break;
+
+                    case "THREAD_CREATE":
+                        {
+                            var threadId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            var timestamp =
+                                data.TryGetProperty("thread_metadata", out var meta)
+                                && meta.TryGetProperty("create_timestamp", out var ct)
+                                    ? DateTimeOffset.Parse(ct.GetString()!)
+                                    : DateTimeOffset.UtcNow;
+                            queue.EnqueueChannelExport(threadId, timestamp);
+                        }
+                        break;
+
+                    case "THREAD_UPDATE":
+                        {
+                            var channelId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            queue.EnqueueChannelExport(channelId, null);
+                        }
+                        break;
+
+                    case "CHANNEL_UPDATE":
+                        {
+                            var channelId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            var isCategory =
+                                data.TryGetProperty("type", out var typeProp)
+                                && typeProp.GetInt32() == 4;
+                            if (isCategory)
+                            {
+                                _ = Task.Run(
+                                    async () =>
+                                    {
+                                        try
+                                        {
+                                            lock (console)
+                                                console.Output.WriteLine(
+                                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway] Category updated: {channelId}. Enqueueing child channels..."
+                                                );
+                                            await foreach (
+                                                var ch in Discord.GetGuildChannelsAsync(
+                                                    GuildId,
+                                                    cts.Token
+                                                )
+                                            )
+                                            {
+                                                if (ch.Parent?.Id == channelId)
+                                                {
+                                                    queue.EnqueueChannelExport(ch.Id, null);
+                                                }
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            lock (console)
+                                                console.Error.WriteLine(
+                                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway-error] Category update child enumeration failed: {ex.Message}"
+                                                );
+                                        }
+                                    },
+                                    cts.Token
+                                );
+                            }
+                            else
+                            {
+                                queue.EnqueueChannelExport(channelId, null);
+                            }
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (console)
+                    console.Error.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [dispatch-error] {ex.Message}"
+                    );
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        var gatewayTask = Task.Run(() => gatewayClient.RunAsync(cts.Token), cts.Token);
+
+        var lastStatusLog = DateTimeOffset.UtcNow;
+
+        while (!cts.Token.IsCancellationRequested)
+        {
+            if (DateTimeOffset.UtcNow - lastStatusLog >= TimeSpan.FromSeconds(60))
+            {
+                lock (console)
+                {
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [status] queue status: "
+                            + $"messages={queue.PendingMessagesCount}, channels={queue.PendingChannelsCount}, patches={queue.PendingPatchesCount}, "
+                            + $"deleteChannels={queue.PendingDeleteChannelsCount}, deleteMessages={queue.PendingDeleteMessagesCount}, "
+                            + $"guildSync={(queue.IsGuildSyncPending ? "pending" : "idle")}"
+                    );
+                }
+                lastStatusLog = DateTimeOffset.UtcNow;
+            }
+
+            var item = queue.TryDequeue();
+            if (item is not null)
+            {
+                try
+                {
+                    await ProcessQueueItemAsync(item, store, console, cts.Token);
+                    queue.ReportSuccess(item);
+                }
+                catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        await store.RollbackAsync(CancellationToken.None);
+                    }
+                    catch (Exception rbEx)
+                    {
+                        lock (console)
+                            console.Error.WriteLine(
+                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [rollback-error] Failed to rollback transaction: {rbEx.Message}"
+                            );
+                    }
+
+                    lock (console)
+                    {
+                        console.Error.WriteLine(
+                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump-error] Error processing queue item: {ex.Message}"
+                        );
+                    }
+
+                    var retrying = queue.ReportFailure(item);
+                    if (retrying)
+                    {
+                        lock (console)
+                            console.Output.WriteLine(
+                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Re-queued item for retry."
+                            );
+                    }
+                    else
+                    {
+                        lock (console)
+                            console.Error.WriteLine(
+                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Gave up on queue item after maximum retries."
+                            );
+                    }
+                }
+            }
+            else
+            {
+                try
+                {
+                    // Short idle tick so a freshly-arrived live message is picked up within ~100ms
+                    // rather than waiting out a long poll interval.
+                    await Task.Delay(100, cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
+
+        try
+        {
+            await gatewayTask;
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    // Ensures the channel row (and its guild) exist before a message's foreign key needs them.
+    // Results are cached, so this costs at most one existence probe -- and, for a brand-new
+    // channel/thread, one Discord fetch -- per channel per session.
+    private async ValueTask EnsureChannelExistsAsync(
+        Snowflake channelId,
+        SqliteExportStore store,
+        CancellationToken cancellationToken
+    )
+    {
+        if (_knownChannelIds.Contains(channelId))
+            return;
+
+        if (await store.ChannelExistsAsync(channelId, cancellationToken))
+        {
+            _knownChannelIds.Add(channelId);
+            return;
+        }
+
+        var channel = await Discord.GetChannelAsync(channelId, cancellationToken);
+        var guild = await Discord.GetGuildAsync(channel.GuildId, cancellationToken);
+        await store.UpsertGuildAsync(guild, cancellationToken);
+        await store.UpsertChannelAsync(channel, cancellationToken);
+        _knownChannelIds.Add(channelId);
+    }
+
+    private async ValueTask<ExportRequest> CreateExportRequestAsync(
+        Snowflake channelId,
+        bool forceFullScan,
+        CancellationToken cancellationToken,
+        Snowflake? after = null
+    )
+    {
+        var channel = await Discord.GetChannelAsync(channelId, cancellationToken);
+        var guild = await Discord.GetGuildAsync(channel.GuildId, cancellationToken);
+        return new ExportRequest(
+            guild,
+            channel,
+            OutputPath,
+            null,
+            ExportFormat.Db,
+            after,
+            null,
+            PartitionLimit.Null,
+            MessageFilter.Null,
+            false,
+            true,
+            false,
+            false,
+            null,
+            false,
+            forceFullScan: forceFullScan
+        );
+    }
+
+    private async ValueTask ProcessQueueItemAsync(
+        QueueItem item,
+        SqliteExportStore store,
+        IConsole console,
+        CancellationToken cancellationToken
+    )
+    {
+        if (item is UpsertMessageItem upsert)
+        {
+            // Hot path: write the already-materialized gateway message straight to the database.
+            // Intentionally not logged per-message -- on a busy guild that would flood the log;
+            // the periodic [status] line reports throughput instead.
+            await EnsureChannelExistsAsync(upsert.ChannelId, store, cancellationToken);
+
+            foreach (var user in upsert.Message.GetReferencedUsers())
+                await store.UpsertUserAsync(user, null, Array.Empty<Role>(), cancellationToken);
+
+            await store.UpsertMessageAsync(upsert.ChannelId, upsert.Message, cancellationToken);
+            await store.FlushAsync(cancellationToken);
+            return;
+        }
+
+        if (item is PatchMessageItem patch)
+        {
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Patching message {patch.MessageId} in channel {patch.ChannelId} ({patch.Reason})..."
+                );
+            var req = await CreateExportRequestAsync(
+                patch.ChannelId,
+                forceFullScan: false,
+                cancellationToken
+            );
+            var result = await DatabaseMessagePatcher.PatchMessageAsync(
+                req,
+                Discord,
+                store,
+                patch.MessageId,
+                cancellationToken
+            );
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Patch result: {result.Reason}"
+                );
+        }
+        else if (item is MarkDeletedItem delete)
+        {
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Marking {delete.MessageIds.Count} messages deleted in channel {delete.ChannelId}..."
+                );
+            foreach (var messageId in delete.MessageIds)
+            {
+                await store.MarkMessageDeletedAsync(
+                    delete.ChannelId,
+                    messageId,
+                    DateTimeOffset.UtcNow,
+                    cancellationToken
+                );
+            }
+            await store.FlushAsync(cancellationToken);
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Marked messages deleted."
+                );
+        }
+        else if (item is SyncGuildItem sync)
+        {
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Syncing guild catalog ({sync.Reason})..."
+                );
+            var (roleCount, emojiCount, stickerCount, scheduledEventCount) =
+                await SyncGuildCommand.SyncGuildAsync(Discord, store, GuildId, cancellationToken);
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Synced guild catalog: {roleCount} roles, {emojiCount} emojis, {stickerCount} stickers, {scheduledEventCount} events."
+                );
+        }
+        else if (item is ExportChannelItem export)
+        {
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Exporting channel {export.ChannelId} (IsCatchup={export.IsCatchup}, ForceFullScan={export.ForceFullScan})..."
+                );
+            try
+            {
+                // To prevent backfilling the entire channel history for a brand-new/empty DB,
+                // we set `after` to the first timestamp we observed during this run.
+                // However, if the database already has a stored cursor, we leave `after` null
+                // so ChannelExporter resumes from the stored cursor (LastMessageId) and correctly
+                // fills any gap that arrived while disconnected.
+                Snowflake? after = null;
+                if (!export.IsCatchup && !export.ForceFullScan)
+                {
+                    var storedState = await store.GetChannelStateAsync(
+                        export.ChannelId,
+                        cancellationToken
+                    );
+                    if (storedState is null && export.FirstTimestamp.HasValue)
+                    {
+                        after = Snowflake.FromDate(export.FirstTimestamp.Value);
+                    }
+                }
+
+                var req = await CreateExportRequestAsync(
+                    export.ChannelId,
+                    forceFullScan: export.ForceFullScan,
+                    cancellationToken,
+                    after
+                );
+                var exporter = new ChannelExporter(Discord);
+                await exporter.ExportChannelAsync(req, store, null, cancellationToken);
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Exported channel {export.ChannelId}."
+                    );
+            }
+            catch (ChannelEmptyException)
+            {
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Channel {export.ChannelId} is empty or has no messages in the specified range."
+                    );
+            }
+        }
+    }
+}

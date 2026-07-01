@@ -424,6 +424,29 @@ public sealed class SqliteExportStore : IAsyncDisposable
         Snowflake? LastExportBefore
     );
 
+    // Cheap existence probe used by the live watcher's direct-upsert fast path: a message row
+    // has a foreign key to channel(id), so the channel must exist before its messages can be
+    // inserted. Callers cache the result, so this runs at most once per channel per session.
+    public async ValueTask<bool> ChannelExistsAsync(
+        Snowflake channelId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                "SELECT 1 FROM channel WHERE id = $id LIMIT 1;"
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(channelId));
+            return await command.ExecuteScalarAsync(cancellationToken) is not null;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async ValueTask<ChannelState?> GetChannelStateAsync(
         Snowflake channelId,
         CancellationToken cancellationToken = default

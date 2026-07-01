@@ -24,7 +24,12 @@ namespace DiscordChatExporter.Core.Discord;
 public class DiscordClient
 {
     private readonly IReadOnlyList<string> _tokens;
+    public IReadOnlyList<string> Tokens => _tokens;
     private readonly RateLimitPreference _rateLimitPreference;
+
+    // Defaults to the shared Http.Client for normal use; overridable so tests can inject a mock
+    // handler without mutating global state (which would race other test classes run in parallel).
+    private readonly HttpClient _httpClient;
     private readonly Uri _baseUri = new("https://discord.com/api/v10/", UriKind.Absolute);
 
     // Per-token state, indexed in parallel with `_tokens`
@@ -38,7 +43,8 @@ public class DiscordClient
 
     public DiscordClient(
         IReadOnlyList<string> tokens,
-        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll
+        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll,
+        HttpClient? httpClient = null
     )
     {
         if (tokens.Count <= 0)
@@ -49,15 +55,17 @@ public class DiscordClient
 
         _tokens = tokens;
         _rateLimitPreference = rateLimitPreference;
+        _httpClient = httpClient ?? Http.Client;
         _resolvedTokenKinds = new TokenKind?[tokens.Count];
         _isTokenInvalid = new bool[tokens.Count];
     }
 
     public DiscordClient(
         string token,
-        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll
+        RateLimitPreference rateLimitPreference = RateLimitPreference.RespectAll,
+        HttpClient? httpClient = null
     )
-        : this([token], rateLimitPreference) { }
+        : this([token], rateLimitPreference, httpClient) { }
 
     private async ValueTask<HttpResponseMessage> GetResponseAsync(
         string url,
@@ -96,7 +104,7 @@ public class DiscordClient
                     tokenKind == TokenKind.Bot ? $"Bot {token}" : token
                 );
 
-                var response = await Http.Client.SendAsync(
+                var response = await _httpClient.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
                     innerCancellationToken
@@ -1196,5 +1204,77 @@ public class DiscordClient
             if (count <= 0)
                 yield break;
         }
+    }
+
+    public async ValueTask<IReadOnlyList<Message>> GetPinnedMessagesAsync(
+        Snowflake channelId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var messages = new List<Message>();
+        string? before = null;
+
+        while (true)
+        {
+            var query = before is not null ? $"?before={Uri.EscapeDataString(before)}" : "";
+            var response = await GetJsonResponseAsync(
+                $"channels/{channelId}/messages/pins{query}",
+                cancellationToken
+            );
+
+            // Legacy shape: a plain array of message objects (capped at 50, no pagination).
+            if (response.ValueKind == JsonValueKind.Array)
+            {
+                messages.AddRange(response.EnumerateArray().Select(Message.Parse));
+                break;
+            }
+
+            if (response.ValueKind == JsonValueKind.Object)
+            {
+                // Current shape: { items: [{ message, pinned_at }], has_more }.
+                string? lastPinnedAt = null;
+                if (
+                    response.TryGetProperty("items", out var itemsProp)
+                    && itemsProp.ValueKind == JsonValueKind.Array
+                )
+                {
+                    foreach (var item in itemsProp.EnumerateArray())
+                    {
+                        if (
+                            item.TryGetProperty("message", out var msgProp)
+                            && msgProp.ValueKind == JsonValueKind.Object
+                        )
+                        {
+                            messages.Add(Message.Parse(msgProp));
+                        }
+
+                        // The paginated endpoint cursors on the last item's `pinned_at`
+                        // timestamp, NOT on a message id.
+                        if (
+                            item.TryGetProperty("pinned_at", out var pinnedAtProp)
+                            && pinnedAtProp.ValueKind == JsonValueKind.String
+                        )
+                        {
+                            lastPinnedAt = pinnedAtProp.GetString();
+                        }
+                    }
+                }
+
+                var hasMore =
+                    response.TryGetProperty("has_more", out var hasMoreProp)
+                    && hasMoreProp.ValueKind == JsonValueKind.True;
+                if (hasMore && lastPinnedAt is not null)
+                {
+                    before = lastPinnedAt;
+                    continue;
+                }
+
+                break;
+            }
+
+            break;
+        }
+
+        return messages;
     }
 }

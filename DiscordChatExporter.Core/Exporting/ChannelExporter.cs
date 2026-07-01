@@ -55,7 +55,8 @@ public class ChannelExporter(DiscordClient discord)
         // Skip if nothing has changed since the last time this channel was exported into this
         // database -- mirrors the JSON path's manifest-based skip (see HeaderMatchesRequest).
         if (
-            storedState is not null
+            !request.ForceFullScan
+            && storedState is not null
             && storedState.LastMessageId == request.Channel.LastMessageId
             && stateMatchesRequest
         )
@@ -70,7 +71,11 @@ public class ChannelExporter(DiscordClient discord)
         // silently narrow the fetch range right back to "nothing new" even though the request
         // asks for a wider range -- upserts are idempotent, so re-fetching overlap is safe.
         var fetchAfter = request.After;
-        if (stateMatchesRequest && storedState?.LastMessageId is { } lastMessageId)
+        if (
+            !request.ForceFullScan
+            && stateMatchesRequest
+            && storedState?.LastMessageId is { } lastMessageId
+        )
         {
             fetchAfter =
                 fetchAfter is not null && fetchAfter > lastMessageId ? fetchAfter : lastMessageId;
