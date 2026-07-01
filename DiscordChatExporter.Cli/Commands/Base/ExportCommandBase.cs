@@ -17,6 +17,7 @@ using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exceptions;
 using DiscordChatExporter.Core.Exporting;
+using DiscordChatExporter.Core.Exporting.Database;
 using DiscordChatExporter.Core.Exporting.Filtering;
 using DiscordChatExporter.Core.Exporting.Partitioning;
 using Gress;
@@ -234,6 +235,24 @@ public abstract class ExportCommandBase : DiscordCommandBase
             );
         }
 
+        if (ExportFormat == ExportFormat.Db)
+        {
+            if (PartitionLimit != PartitionLimit.Null)
+            {
+                throw new CommandException(
+                    "Option --partition cannot be used with the 'db' format."
+                );
+            }
+
+            if (ShouldDownloadAssets || ShouldCacheAssetsOnly)
+            {
+                throw new CommandException(
+                    "Options --media and --cache-media have no effect with the 'db' format "
+                        + "and cannot be used with it."
+                );
+            }
+        }
+
         ExportManifest? manifest = null;
         string? manifestDir = null;
         if (IsIncremental)
@@ -292,8 +311,10 @@ public abstract class ExportCommandBase : DiscordCommandBase
         var mightExportMultiple =
             channels.Count > 1 || ThreadInclusionMode != ThreadInclusionMode.None;
         var isValidOutputPath =
+            // A database is always one consolidated file, regardless of channel count
+            ExportFormat == ExportFormat.Db
             // Anything is valid when we know there's at most one channel
-            !mightExportMultiple
+            || !mightExportMultiple
             // When using template tokens, assume the user knows what they're doing
             || OutputPath.Contains('%')
             // Otherwise, require an existing directory or an unambiguous directory path
@@ -385,82 +406,111 @@ public abstract class ExportCommandBase : DiscordCommandBase
         var warningsByChannel = new ConcurrentDictionary<Channel, string>();
         var totalChannelCount = 0;
 
-        await console.Output.WriteLineAsync("Exporting channels...");
-        await console
-            .CreateProgressTicker()
-            .HideCompleted(
-                // When exporting multiple channels in parallel, hide the completed tasks
-                // because it gets hard to visually parse them as they complete out of order.
-                // https://github.com/Tyrrrz/DiscordChatExporter/issues/1124
-                ParallelLimit > 1
-            )
-            .StartAsync(async ctx =>
-            {
-                await Parallel.ForEachAsync(
-                    GetAllChannelsAsync(),
-                    new ParallelOptions
-                    {
-                        MaxDegreeOfParallelism = Math.Max(1, ParallelLimit),
-                        CancellationToken = cancellationToken,
-                    },
-                    async (channel, innerCancellationToken) =>
-                    {
-                        Interlocked.Increment(ref totalChannelCount);
-                        try
-                        {
-                            await ctx.StartTaskAsync(
-                                Markup.Escape(channel.GetHierarchicalName()),
-                                async progress =>
-                                {
-                                    var guild = await Discord.GetGuildAsync(
-                                        channel.GuildId,
-                                        innerCancellationToken
-                                    );
+        // A database export shares one consolidated store across every channel, opened once
+        // up front and flushed/closed once the whole run finishes (successfully or not).
+        var databaseStore =
+            ExportFormat == ExportFormat.Db
+                ? await SqliteExportStore.OpenAsync(OutputPath, cancellationToken)
+                : null;
 
-                                    var request = new ExportRequest(
-                                        guild,
-                                        channel,
-                                        OutputPath,
-                                        AssetsDirPath,
-                                        ExportFormat,
-                                        After,
-                                        Before,
-                                        PartitionLimit,
-                                        MessageFilter,
-                                        IsReverseMessageOrder,
-                                        ShouldFormatMarkdown,
-                                        ShouldDownloadAssets,
-                                        ShouldReuseAssets,
-                                        Locale,
-                                        IsUtcNormalizationEnabled,
-                                        IsIncremental,
-                                        ShouldCacheAssetsOnly,
-                                        shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
-                                        isCompact: IsCompact
-                                    );
+        try
+        {
+            await console.Output.WriteLineAsync("Exporting channels...");
+            await console
+                .CreateProgressTicker()
+                .HideCompleted(
+                    // When exporting multiple channels in parallel, hide the completed tasks
+                    // because it gets hard to visually parse them as they complete out of order.
+                    // https://github.com/Tyrrrz/DiscordChatExporter/issues/1124
+                    ParallelLimit > 1
+                )
+                .StartAsync(async ctx =>
+                {
+                    await Parallel.ForEachAsync(
+                        GetAllChannelsAsync(),
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = Math.Max(1, ParallelLimit),
+                            CancellationToken = cancellationToken,
+                        },
+                        async (channel, innerCancellationToken) =>
+                        {
+                            Interlocked.Increment(ref totalChannelCount);
+                            try
+                            {
+                                await ctx.StartTaskAsync(
+                                    Markup.Escape(channel.GetHierarchicalName()),
+                                    async progress =>
+                                    {
+                                        var guild = await Discord.GetGuildAsync(
+                                            channel.GuildId,
+                                            innerCancellationToken
+                                        );
 
-                                    await Exporter.ExportChannelAsync(
-                                        request,
-                                        manifest,
-                                        progress.ToExportProgress(
-                                            Markup.Escape(channel.GetHierarchicalName())
-                                        ),
-                                        innerCancellationToken
-                                    );
-                                }
-                            );
+                                        var request = new ExportRequest(
+                                            guild,
+                                            channel,
+                                            OutputPath,
+                                            AssetsDirPath,
+                                            ExportFormat,
+                                            After,
+                                            Before,
+                                            PartitionLimit,
+                                            MessageFilter,
+                                            IsReverseMessageOrder,
+                                            ShouldFormatMarkdown,
+                                            ShouldDownloadAssets,
+                                            ShouldReuseAssets,
+                                            Locale,
+                                            IsUtcNormalizationEnabled,
+                                            IsIncremental,
+                                            ShouldCacheAssetsOnly,
+                                            shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
+                                            isCompact: IsCompact
+                                        );
+
+                                        if (databaseStore is not null)
+                                        {
+                                            await Exporter.ExportChannelAsync(
+                                                request,
+                                                databaseStore,
+                                                progress.ToExportProgress(
+                                                    Markup.Escape(channel.GetHierarchicalName())
+                                                ),
+                                                innerCancellationToken
+                                            );
+                                        }
+                                        else
+                                        {
+                                            await Exporter.ExportChannelAsync(
+                                                request,
+                                                manifest,
+                                                progress.ToExportProgress(
+                                                    Markup.Escape(channel.GetHierarchicalName())
+                                                ),
+                                                innerCancellationToken
+                                            );
+                                        }
+                                    }
+                                );
+                            }
+                            catch (ChannelEmptyException ex)
+                            {
+                                warningsByChannel[channel] = ex.Message;
+                            }
+                            catch (DiscordChatExporterException ex) when (!ex.IsFatal)
+                            {
+                                errorsByChannel[channel] = ex.Message;
+                            }
                         }
-                        catch (ChannelEmptyException ex)
-                        {
-                            warningsByChannel[channel] = ex.Message;
-                        }
-                        catch (DiscordChatExporterException ex) when (!ex.IsFatal)
-                        {
-                            errorsByChannel[channel] = ex.Message;
-                        }
-                    }
-                );
-            });
+                    );
+                });
+        }
+        finally
+        {
+            if (databaseStore is not null)
+                await databaseStore.DisposeAsync();
+        }
 
         if (ThreadInclusionMode != ThreadInclusionMode.None)
             await console.Output.WriteLineAsync($"Fetched {fetchedThreadsCount} thread(s).");

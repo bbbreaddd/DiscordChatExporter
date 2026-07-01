@@ -9,6 +9,7 @@ using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Exporting;
+using DiscordChatExporter.Core.Exporting.Database;
 using DiscordChatExporter.Core.Exporting.Filtering;
 using DiscordChatExporter.Core.Exporting.Partitioning;
 
@@ -34,8 +35,9 @@ public partial class PatchMessageCommand : DiscordCommandBase
     [CommandOption(
         "output",
         'o',
-        Description = "Directory the channel was originally exported to (must match, so the "
-            + "same output file path is computed)."
+        Description = "For JSON format: directory the channel was originally exported to (must "
+            + "match, so the same output file path is computed). For the database format: path "
+            + "to the SQLite database file."
     )]
     public string OutputPath
     {
@@ -44,6 +46,14 @@ public partial class PatchMessageCommand : DiscordCommandBase
         // https://github.com/Tyrrrz/DiscordChatExporter/pull/903
         set => field = Path.GetFullPath(value);
     } = Directory.GetCurrentDirectory();
+
+    [CommandOption(
+        "format",
+        'f',
+        Description = "Which store to patch the message in. Choices: 'Json' (default, patches "
+            + "the JSON export in place) or 'Db' (upserts the message into a SQLite database)."
+    )]
+    public ExportFormat ExportFormat { get; set; } = ExportFormat.Json;
 
     [CommandOption(
         "after",
@@ -67,6 +77,13 @@ public partial class PatchMessageCommand : DiscordCommandBase
     {
         await base.ExecuteAsync(console);
 
+        if (ExportFormat is not ExportFormat.Json and not ExportFormat.Db)
+        {
+            throw new CommandException(
+                "Option --format only supports 'Json' or 'Db' for patch-message."
+            );
+        }
+
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         var stopwatch = Stopwatch.StartNew();
@@ -79,7 +96,7 @@ public partial class PatchMessageCommand : DiscordCommandBase
             channel,
             OutputPath,
             null,
-            ExportFormat.Json,
+            ExportFormat,
             After,
             Before,
             PartitionLimit.Null,
@@ -96,12 +113,21 @@ public partial class PatchMessageCommand : DiscordCommandBase
             $"Patching message {MessageId} in channel '{channel.Name}' (#{channel.Id})..."
         );
 
-        var result = await MessagePatcher.PatchMessageAsync(
-            request,
-            Discord,
-            MessageId,
-            cancellationToken
-        );
+        var result =
+            ExportFormat == ExportFormat.Db
+                ? await DatabaseMessagePatcher.PatchMessageAsync(
+                    request,
+                    Discord,
+                    OutputPath,
+                    MessageId,
+                    cancellationToken
+                )
+                : await MessagePatcher.PatchMessageAsync(
+                    request,
+                    Discord,
+                    MessageId,
+                    cancellationToken
+                );
 
         stopwatch.Stop();
 

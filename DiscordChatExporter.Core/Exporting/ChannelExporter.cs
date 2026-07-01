@@ -9,6 +9,7 @@ using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exceptions;
 using DiscordChatExporter.Core.Exporting.Converting;
+using DiscordChatExporter.Core.Exporting.Database;
 using Gress;
 using JsonExtensions.Reading;
 using PowerKit.Extensions;
@@ -17,6 +18,164 @@ namespace DiscordChatExporter.Core.Exporting;
 
 public class ChannelExporter(DiscordClient discord)
 {
+    // Live export straight into a consolidated SQLite database. Message IDs are globally unique
+    // and the database enforces that via its primary key, so -- unlike the JSON path above --
+    // there is no byte-level merge, partitioning, or crash-recovery machinery to replicate here:
+    // every write is a plain upsert, and a transaction that never committed is simply retried
+    // (from the last message id actually stored) the next time this runs.
+    public async ValueTask ExportChannelAsync(
+        ExportRequest request,
+        SqliteExportStore databaseStore,
+        IProgress<ExportProgress>? progress = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        // Forum channels don't have messages, they are just a list of threads
+        if (request.Channel.Kind == ChannelKind.GuildForum)
+        {
+            throw new DiscordChatExporterException(
+                $"Channel '{request.Channel.Name}' "
+                    + $"of guild '{request.Guild.Name}' "
+                    + $"is a forum and cannot be exported directly. "
+                    + "You need to pull its threads and export them individually."
+            );
+        }
+
+        await databaseStore.UpsertGuildAsync(request.Guild, cancellationToken);
+        await databaseStore.UpsertChannelAsync(request.Channel, cancellationToken);
+
+        var storedState = await databaseStore.GetChannelStateAsync(
+            request.Channel.Id,
+            cancellationToken
+        );
+
+        // Skip if nothing has changed since the last time this channel was exported into this
+        // database -- mirrors the JSON path's manifest-based skip (see HeaderMatchesRequest).
+        if (
+            storedState is not null
+            && storedState.LastMessageId == request.Channel.LastMessageId
+            && ChannelStateMatchesRequest(storedState, request)
+        )
+        {
+            progress?.Report(new ExportProgress(Percentage.FromFraction(1.0)));
+            return;
+        }
+
+        var fetchAfter = request.After;
+        if (storedState?.LastMessageId is { } lastMessageId)
+        {
+            fetchAfter =
+                fetchAfter is not null && fetchAfter > lastMessageId ? fetchAfter : lastMessageId;
+        }
+
+        var context = new ExportContext(discord, request);
+        await context.PopulateChannelsAndRolesAsync(cancellationToken);
+
+        var messages = !request.IsReverseMessageOrder
+            ? discord.GetMessagesAsync(
+                request.Channel.Id,
+                fetchAfter,
+                request.Before,
+                progress,
+                cancellationToken
+            )
+            : discord.GetMessagesInReverseAsync(
+                request.Channel.Id,
+                fetchAfter,
+                request.Before,
+                progress,
+                cancellationToken
+            );
+
+        var maxMessageId = storedState?.LastMessageId;
+
+        await foreach (var message in messages)
+        {
+            try
+            {
+                foreach (var user in message.GetReferencedUsers())
+                {
+                    await context.PopulateMemberAsync(user, cancellationToken);
+                    var member = context.TryGetMember(user.Id);
+
+                    await databaseStore.UpsertUserAsync(
+                        user,
+                        context.GetUserRoles(user.Id),
+                        member?.DisplayName,
+                        member?.AvatarUrl,
+                        cancellationToken
+                    );
+                }
+
+                if (request.MessageFilter.IsMatch(message))
+                {
+                    await databaseStore.UpsertMessageAsync(
+                        request.Channel.Id,
+                        message,
+                        cancellationToken
+                    );
+
+                    if (maxMessageId is null || message.Id > maxMessageId.Value)
+                        maxMessageId = message.Id;
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new DiscordChatExporterException(
+                    $"Failed to export message #{message.Id} "
+                        + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                        + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                    ex
+                );
+            }
+        }
+
+        await databaseStore.UpdateChannelExportStateAsync(
+            request.Channel.Id,
+            maxMessageId ?? request.Channel.LastMessageId,
+            request.Channel.IsArchived,
+            DateTimeOffset.UtcNow,
+            cancellationToken
+        );
+
+        // Commit now so a channel that completes successfully is never rolled back by a later
+        // channel's failure sharing the same pending transaction.
+        await databaseStore.FlushAsync(cancellationToken);
+    }
+
+    // Compares a channel's stored database state against the live request, analogous to
+    // HeaderMatchesRequest for the JSON export format. Icon URLs aren't tracked in the channel
+    // table, so (unlike the JSON path) an icon-only change won't by itself trigger a re-export.
+    private static bool ChannelStateMatchesRequest(
+        SqliteExportStore.ChannelState state,
+        ExportRequest request
+    )
+    {
+        if (state.Kind != request.Channel.Kind)
+            return false;
+
+        if (state.Name != request.Channel.Name)
+            return false;
+
+        if (state.Topic != request.Channel.Topic)
+            return false;
+
+        if (state.CategoryId != request.Channel.Parent?.Id)
+            return false;
+
+        if (state.Category != request.Channel.Parent?.Name)
+            return false;
+
+        if (state.ParentCategoryId != request.Channel.Parent?.Parent?.Id)
+            return false;
+
+        if (state.ParentCategory != request.Channel.Parent?.Parent?.Name)
+            return false;
+
+        return true;
+    }
+
     public async ValueTask ExportChannelAsync(
         ExportRequest request,
         ExportManifest? manifest = null,

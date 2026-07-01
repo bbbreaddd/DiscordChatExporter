@@ -9,6 +9,8 @@
     <PackageReference Include="CSharpier.MsBuild" PrivateAssets="all" />
     <PackageReference Include="Gress" />
     <PackageReference Include="JsonExtensions" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" />
     <PackageReference Include="Polly" />
     <PackageReference Include="PowerKit" />
     <PackageReference Include="RazorBlade" />

@@ -159,6 +159,13 @@ public partial class ConvertCommand : ICommand
             );
         }
 
+        if (ExportFormat == ExportFormat.Db)
+        {
+            throw new CommandException(
+                "Cannot convert to a SQLite database with this command. Use 'todatabase' instead."
+            );
+        }
+
         if (
             ShouldUseHtmlSharedAssets
             && ExportFormat is not ExportFormat.HtmlDark and not ExportFormat.HtmlLight
