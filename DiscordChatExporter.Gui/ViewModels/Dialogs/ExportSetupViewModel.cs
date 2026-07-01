@@ -88,7 +88,14 @@ public partial class ExportSetupViewModel(
 
     public bool IsSingleChannel => Channels?.Count == 1;
 
-    public IReadOnlyList<ExportFormat> AvailableFormats { get; } = Enum.GetValues<ExportFormat>();
+    // ExportFormat.Db is excluded here: the GUI's export pipeline (DashboardViewModel) only
+    // knows how to route through the manifest-based ChannelExporter.ExportChannelAsync overload,
+    // not the SqliteExportStore-aware one, so picking "SQLite Database" would fail with an
+    // unhandled ArgumentOutOfRangeException from MessageExporter.CreateMessageWriter. The CLI's
+    // 'export --format db' remains the supported way to use this format until the GUI gains a
+    // dedicated database-export flow (single consolidated file, no per-channel assets, etc.).
+    public IReadOnlyList<ExportFormat> AvailableFormats { get; } =
+        Enum.GetValues<ExportFormat>().Where(format => format != ExportFormat.Db).ToArray();
 
     public bool IsAfterDateSet => AfterDate is not null;
 

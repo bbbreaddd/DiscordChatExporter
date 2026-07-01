@@ -50,18 +50,50 @@ public partial class MarkMessageDeletedCommand : ICommand
         if (ExportFormat != ExportFormat.Db)
             throw new CommandException("Option --format only supports 'Db' for mark-deleted.");
 
+        if (!File.Exists(OutputPath))
+        {
+            throw new CommandException(
+                $"Database file '{OutputPath}' does not exist. "
+                    + "mark-deleted expects a database already created by a prior "
+                    + "'export --format Db' or 'todatabase' run -- check the --output path."
+            );
+        }
+
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         await using var store = await SqliteExportStore.OpenAsync(OutputPath, cancellationToken);
 
         var deletedAt = DateTimeOffset.UtcNow;
+        var notUpdatedMessageIds = new List<Snowflake>();
         foreach (var messageId in MessageIds)
-            await store.MarkMessageDeletedAsync(messageId, deletedAt, cancellationToken);
+        {
+            var wasUpdated = await store.MarkMessageDeletedAsync(
+                ChannelId,
+                messageId,
+                deletedAt,
+                cancellationToken
+            );
+            if (!wasUpdated)
+                notUpdatedMessageIds.Add(messageId);
+        }
 
         await store.FlushAsync(cancellationToken);
 
+        var updatedCount = MessageIds.Count - notUpdatedMessageIds.Count;
         await console.Output.WriteLineAsync(
-            $"Marked {MessageIds.Count} message(s) in channel #{ChannelId} as deleted."
+            $"Marked {updatedCount} message(s) in channel #{ChannelId} as deleted."
         );
+
+        if (notUpdatedMessageIds.Count > 0)
+        {
+            using (console.WithForegroundColor(ConsoleColor.DarkYellow))
+            {
+                await console.Error.WriteLineAsync(
+                    $"Warning: {notUpdatedMessageIds.Count} message(s) were not updated "
+                        + $"(not found in channel #{ChannelId}, or already marked deleted): "
+                        + string.Join(", ", notUpdatedMessageIds)
+                );
+            }
+        }
     }
 }

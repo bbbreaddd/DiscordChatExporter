@@ -79,6 +79,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
     [
         (1, Schema.V1),
         (2, Schema.V2),
+        (3, Schema.V3),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -95,9 +96,23 @@ public sealed class SqliteExportStore : IAsyncDisposable
             if (userVersion >= version)
                 continue;
 
-            await using var migration = _connection.CreateCommand();
-            migration.CommandText = sql + $"\nPRAGMA user_version = {version};";
-            await migration.ExecuteNonQueryAsync(cancellationToken);
+            // Wrapped in an explicit transaction (DDL is fully transactional in SQLite) so a
+            // crash partway through a multi-statement migration rolls back entirely, leaving
+            // user_version untouched. Without this, a kill between two ALTER TABLE statements
+            // would leave some columns already added but user_version still at the old value,
+            // and every subsequent run would re-attempt the same statements and fail with
+            // "duplicate column name", permanently bricking the database file.
+            await using var transaction = (SqliteTransaction)
+                await _connection.BeginTransactionAsync(cancellationToken);
+
+            await using (var migration = _connection.CreateCommand())
+            {
+                migration.Transaction = transaction;
+                migration.CommandText = sql + $"\nPRAGMA user_version = {version};";
+                await migration.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await transaction.CommitAsync(cancellationToken);
         }
     }
 
@@ -126,6 +141,17 @@ public sealed class SqliteExportStore : IAsyncDisposable
         _pendingCount = 0;
     }
 
+    private async ValueTask RollbackCoreAsync(CancellationToken cancellationToken)
+    {
+        if (_transaction is null)
+            return;
+
+        await _transaction.RollbackAsync(cancellationToken);
+        await _transaction.DisposeAsync();
+        _transaction = null;
+        _pendingCount = 0;
+    }
+
     private async ValueTask MaybeAutoFlushAsync(CancellationToken cancellationToken)
     {
         _pendingCount++;
@@ -142,6 +168,19 @@ public sealed class SqliteExportStore : IAsyncDisposable
         try
         {
             await FlushCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask RollbackAsync(CancellationToken cancellationToken = default)
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await RollbackCoreAsync(cancellationToken);
         }
         finally
         {
@@ -280,6 +319,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
         Snowflake? lastMessageId,
         bool isArchived,
         DateTimeOffset lastExportedAt,
+        Snowflake? lastExportAfter,
+        Snowflake? lastExportBefore,
         CancellationToken cancellationToken = default
     )
     {
@@ -293,7 +334,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 UPDATE channel
                 SET last_message_id = $lastMessageId,
                     is_archived = $isArchived,
-                    last_exported_at = $lastExportedAt
+                    last_exported_at = $lastExportedAt,
+                    last_export_after = $lastExportAfter,
+                    last_export_before = $lastExportBefore
                 WHERE id = $id;
                 """
             );
@@ -303,6 +346,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 "$lastExportedAt",
                 lastExportedAt.ToString("O", CultureInfo.InvariantCulture)
             );
+            command.Parameters.AddWithValue("$lastExportAfter", ToDbId(lastExportAfter));
+            command.Parameters.AddWithValue("$lastExportBefore", ToDbId(lastExportBefore));
             command.Parameters.AddWithValue("$id", ToDbId(channelId));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
@@ -374,7 +419,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
         string? Category,
         Snowflake? ParentCategoryId,
         string? ParentCategory,
-        Snowflake? LastMessageId
+        Snowflake? LastMessageId,
+        Snowflake? LastExportAfter,
+        Snowflake? LastExportBefore
     );
 
     public async ValueTask<ChannelState?> GetChannelStateAsync(
@@ -388,7 +435,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await using var command = CreateCommand(
                 """
                 SELECT kind, name, topic, category_id, category, parent_category_id,
-                       parent_category, last_message_id
+                       parent_category, last_message_id, last_export_after, last_export_before
                 FROM channel
                 WHERE id = $channelId;
                 """
@@ -407,7 +454,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : FromDbId(reader.GetInt64(5)),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : FromDbId(reader.GetInt64(7))
+                reader.IsDBNull(7) ? null : FromDbId(reader.GetInt64(7)),
+                reader.IsDBNull(8) ? null : FromDbId(reader.GetInt64(8)),
+                reader.IsDBNull(9) ? null : FromDbId(reader.GetInt64(9))
             );
         }
         finally
@@ -751,7 +800,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
     // preserved; only deleted_at is set (and only if it wasn't already), which is also what
     // stops a later stale re-export/patch from ever reviving it (see UpsertMessageCoreAsync,
     // which never touches this column).
-    public async ValueTask MarkMessageDeletedAsync(
+    // Returns true if a row was actually updated -- false if no message with this id exists in
+    // this channel, or it was already marked deleted. Callers should surface the false case
+    // rather than assuming success, since it usually means a wrong channel/message id was passed.
+    public async ValueTask<bool> MarkMessageDeletedAsync(
+        Snowflake channelId,
         Snowflake messageId,
         DateTimeOffset deletedAt,
         CancellationToken cancellationToken = default
@@ -765,7 +818,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await using var command = CreateCommand(
                 """
                 UPDATE message SET deleted_at = $deletedAt
-                WHERE id = $id AND deleted_at IS NULL;
+                WHERE id = $id AND channel_id = $channelId AND deleted_at IS NULL;
                 """
             );
             command.Parameters.AddWithValue(
@@ -773,9 +826,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 deletedAt.ToString("O", CultureInfo.InvariantCulture)
             );
             command.Parameters.AddWithValue("$id", ToDbId(messageId));
-            await command.ExecuteNonQueryAsync(cancellationToken);
+            command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+            var rowsAffected = await command.ExecuteNonQueryAsync(cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
+
+            return rowsAffected > 0;
         }
         finally
         {
@@ -1006,7 +1062,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         await _lock.WaitAsync();
         try
         {
-            await FlushCoreAsync(CancellationToken.None);
+            await RollbackCoreAsync(CancellationToken.None);
         }
         finally
         {

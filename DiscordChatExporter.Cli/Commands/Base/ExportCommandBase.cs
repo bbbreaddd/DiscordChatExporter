@@ -251,6 +251,22 @@ public abstract class ExportCommandBase : DiscordCommandBase
                         + "and cannot be used with it."
                 );
             }
+
+            // SqliteExportStore owns exactly one connection and one shared pending transaction
+            // (serialized through a single lock). FlushAsync commits whatever is currently
+            // pending for the WHOLE store, not just the calling channel's writes, so running
+            // multiple channels concurrently against the same store would let one channel's
+            // flush commit another's still in-flight writes -- and if that other channel then
+            // fails, its last_message_id would never advance even though rows were already
+            // committed on its behalf. Restricting to one channel at a time keeps each channel's
+            // commit boundary honest.
+            if (ParallelLimit > 1)
+            {
+                throw new CommandException(
+                    "Option --parallel cannot be used with the 'db' format; "
+                        + "channels are written to the same database one at a time."
+                );
+            }
         }
 
         ExportManifest? manifest = null;
@@ -413,56 +429,68 @@ public abstract class ExportCommandBase : DiscordCommandBase
                 ? await SqliteExportStore.OpenAsync(OutputPath, cancellationToken)
                 : null;
 
-        // Refresh each distinct guild's emoji/sticker/scheduled-event catalog once per
-        // invocation (not per channel -- export/exportguild both funnel through here) rather
-        // than gateway-driven, so these opportunistically stay current on every debounced live
-        // export the watcher already runs, without new plumbing for the export path itself.
-        // Guarded with a HashSet since 'export -c' could in principle span channels from
-        // different guilds even though today's usage is single-guild.
-        if (databaseStore is not null)
-        {
-            var syncedGuildIds = new HashSet<Snowflake>();
-            foreach (var channel in channels)
-            {
-                if (!syncedGuildIds.Add(channel.GuildId))
-                    continue;
-
-                await foreach (
-                    var emoji in Discord.GetGuildEmojisAsync(channel.GuildId, cancellationToken)
-                )
-                    await databaseStore.UpsertGuildEmojiAsync(
-                        emoji,
-                        channel.GuildId,
-                        cancellationToken
-                    );
-
-                await foreach (
-                    var sticker in Discord.GetGuildStickersAsync(channel.GuildId, cancellationToken)
-                )
-                    await databaseStore.UpsertGuildStickerAsync(
-                        sticker,
-                        channel.GuildId,
-                        cancellationToken
-                    );
-
-                await foreach (
-                    var scheduledEvent in Discord.GetGuildScheduledEventsAsync(
-                        channel.GuildId,
-                        cancellationToken
-                    )
-                )
-                    await databaseStore.UpsertScheduledEventAsync(
-                        scheduledEvent,
-                        channel.GuildId,
-                        cancellationToken
-                    );
-            }
-
-            await databaseStore.FlushAsync(cancellationToken);
-        }
-
         try
         {
+            // Refresh each distinct guild's emoji/sticker/scheduled-event catalog once per
+            // invocation (not per channel -- export/exportguild both funnel through here) rather
+            // than gateway-driven, so these opportunistically stay current on every debounced
+            // live export the watcher already runs, without new plumbing for the export path
+            // itself. Guarded with a HashSet since 'export -c' could in principle span channels
+            // from different guilds even though today's usage is single-guild.
+            //
+            // This runs inside the same try/finally that disposes databaseStore below, so a
+            // transient API failure here (5xx, permission error) or a Ctrl+C doesn't leak the
+            // open SQLite connection.
+            if (databaseStore is not null)
+            {
+                var syncedGuildIds = new HashSet<Snowflake>();
+                foreach (var channel in channels)
+                {
+                    if (!syncedGuildIds.Add(channel.GuildId))
+                        continue;
+
+                    await databaseStore.UpsertGuildAsync(
+                        await Discord.GetGuildAsync(channel.GuildId, cancellationToken),
+                        cancellationToken
+                    );
+
+                    await foreach (
+                        var emoji in Discord.GetGuildEmojisAsync(channel.GuildId, cancellationToken)
+                    )
+                        await databaseStore.UpsertGuildEmojiAsync(
+                            emoji,
+                            channel.GuildId,
+                            cancellationToken
+                        );
+
+                    await foreach (
+                        var sticker in Discord.GetGuildStickersAsync(
+                            channel.GuildId,
+                            cancellationToken
+                        )
+                    )
+                        await databaseStore.UpsertGuildStickerAsync(
+                            sticker,
+                            channel.GuildId,
+                            cancellationToken
+                        );
+
+                    await foreach (
+                        var scheduledEvent in Discord.GetGuildScheduledEventsAsync(
+                            channel.GuildId,
+                            cancellationToken
+                        )
+                    )
+                        await databaseStore.UpsertScheduledEventAsync(
+                            scheduledEvent,
+                            channel.GuildId,
+                            cancellationToken
+                        );
+                }
+
+                await databaseStore.FlushAsync(cancellationToken);
+            }
+
             await console.Output.WriteLineAsync("Exporting channels...");
             await console
                 .CreateProgressTicker()
@@ -544,10 +572,16 @@ public abstract class ExportCommandBase : DiscordCommandBase
                             }
                             catch (ChannelEmptyException ex)
                             {
+                                if (databaseStore is not null)
+                                    await databaseStore.RollbackAsync(CancellationToken.None);
+
                                 warningsByChannel[channel] = ex.Message;
                             }
                             catch (DiscordChatExporterException ex) when (!ex.IsFatal)
                             {
+                                if (databaseStore is not null)
+                                    await databaseStore.RollbackAsync(CancellationToken.None);
+
                                 errorsByChannel[channel] = ex.Message;
                             }
                         }

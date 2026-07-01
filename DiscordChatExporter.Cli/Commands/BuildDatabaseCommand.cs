@@ -135,6 +135,9 @@ public partial class BuildDatabaseCommand : ICommand
             totalMessageCount += fileMessageCount;
         }
 
+        foreach (var role in roles.Values)
+            await store.UpsertRoleAsync(role, guild.Id, cancellationToken);
+
         foreach (var member in members.Values)
             await store.UpsertUserAsync(member.User, member, roles, cancellationToken);
 
@@ -171,6 +174,8 @@ public partial class BuildDatabaseCommand : ICommand
             maxMessageId ?? channel.LastMessageId,
             channel.IsArchived,
             DateTimeOffset.UtcNow,
+            null,
+            null,
             cancellationToken
         );
 
@@ -266,6 +271,8 @@ public partial class BuildDatabaseCommand : ICommand
                     }
                     catch (Exception ex) when (ex is not OperationCanceledException)
                     {
+                        await store.RollbackAsync(CancellationToken.None);
+
                         errorsByFile[firstFilePath] = ex.Message;
 
                         if (IsStrict)

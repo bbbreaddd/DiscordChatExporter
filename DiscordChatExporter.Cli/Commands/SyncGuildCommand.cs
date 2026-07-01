@@ -48,6 +48,15 @@ public partial class SyncGuildCommand : DiscordCommandBase
         if (ExportFormat != ExportFormat.Db)
             throw new CommandException("Option --format only supports 'Db' for syncguild.");
 
+        if (!File.Exists(OutputPath))
+        {
+            throw new CommandException(
+                $"Database file '{OutputPath}' does not exist. "
+                    + "syncguild expects a database already created by a prior "
+                    + "'export --format Db' or 'todatabase' run -- check the --output path."
+            );
+        }
+
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         var guild = await Discord.GetGuildAsync(GuildId, cancellationToken);

@@ -49,23 +49,61 @@ public class ChannelExporter(DiscordClient discord)
             cancellationToken
         );
 
+        var stateMatchesRequest =
+            storedState is not null && ChannelStateMatchesRequest(storedState, request);
+
         // Skip if nothing has changed since the last time this channel was exported into this
         // database -- mirrors the JSON path's manifest-based skip (see HeaderMatchesRequest).
         if (
             storedState is not null
             && storedState.LastMessageId == request.Channel.LastMessageId
-            && ChannelStateMatchesRequest(storedState, request)
+            && stateMatchesRequest
         )
         {
             progress?.Report(new ExportProgress(Percentage.FromFraction(1.0)));
             return;
         }
 
+        // Only trust the stored LastMessageId as a resume point when this run's After/Before
+        // (and channel metadata) match the run that produced it. Otherwise (e.g. the user
+        // widened --after to backfill older history), clamping fetchAfter to LastMessageId would
+        // silently narrow the fetch range right back to "nothing new" even though the request
+        // asks for a wider range -- upserts are idempotent, so re-fetching overlap is safe.
         var fetchAfter = request.After;
-        if (storedState?.LastMessageId is { } lastMessageId)
+        if (stateMatchesRequest && storedState?.LastMessageId is { } lastMessageId)
         {
             fetchAfter =
                 fetchAfter is not null && fetchAfter > lastMessageId ? fetchAfter : lastMessageId;
+        }
+
+        // Forum channels don't have messages; an empty/filtered-out channel produces nothing to
+        // write, which the JSON export path surfaces as a warning rather than a silent success --
+        // mirror that here instead of reporting "exported" for a channel that wrote zero rows.
+        if (request.Channel.IsEmpty)
+        {
+            throw new ChannelEmptyException(
+                $"Channel '{request.Channel.Name}' "
+                    + $"of guild '{request.Guild.Name}' "
+                    + $"does not contain any messages."
+            );
+        }
+
+        if (
+            (
+                request.Before is not null
+                && !request.Channel.MayHaveMessagesBefore(request.Before.Value)
+            )
+            || (
+                request.After is not null
+                && !request.Channel.MayHaveMessagesAfter(request.After.Value)
+            )
+        )
+        {
+            throw new ChannelEmptyException(
+                $"Channel '{request.Channel.Name}' "
+                    + $"of guild '{request.Guild.Name}' "
+                    + $"does not contain any messages within the specified period."
+            );
         }
 
         var context = new ExportContext(discord, request);
@@ -138,6 +176,8 @@ public class ChannelExporter(DiscordClient discord)
             maxMessageId ?? request.Channel.LastMessageId,
             request.Channel.IsArchived,
             DateTimeOffset.UtcNow,
+            request.After,
+            request.Before,
             cancellationToken
         );
 
@@ -173,6 +213,12 @@ public class ChannelExporter(DiscordClient discord)
             return false;
 
         if (state.ParentCategory != request.Channel.Parent?.Parent?.Name)
+            return false;
+
+        if (state.LastExportAfter != request.After)
+            return false;
+
+        if (state.LastExportBefore != request.Before)
             return false;
 
         return true;

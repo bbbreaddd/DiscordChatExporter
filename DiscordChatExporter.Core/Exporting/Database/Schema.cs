@@ -195,4 +195,13 @@ internal static class Schema
             VALUES (NEW.id, NEW.channel_id, NEW.is_pinned, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
         END;
         """;
+
+    // Records the --after/--before boundaries used by the run that produced last_message_id, so
+    // the live-export skip check can tell a genuine "nothing new" rerun apart from a rerun with a
+    // widened date range (e.g. a backfill), which must not be skipped even though LastMessageId
+    // hasn't moved.
+    public const string V3 = """
+        ALTER TABLE channel ADD COLUMN last_export_after INTEGER;
+        ALTER TABLE channel ADD COLUMN last_export_before INTEGER;
+        """;
 }
