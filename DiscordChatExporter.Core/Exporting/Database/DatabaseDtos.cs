@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -17,7 +18,18 @@ namespace DiscordChatExporter.Core.Exporting.Database;
 // consumed by ExportedMessageParser, so the JSON columns stay familiar and inspectable via
 // json_extract() to anyone who has already seen a JSON export.
 
-internal record RoleDto(string Id, string Name, string? Color, int Position);
+internal record RoleDto(
+    string Id,
+    string Name,
+    string? Color,
+    int Position,
+    string Permissions,
+    bool Hoist,
+    bool Mentionable,
+    string? IconUrl,
+    string? UnicodeEmoji,
+    bool Managed
+);
 
 internal record UserDto(
     string Id,
@@ -27,7 +39,11 @@ internal record UserDto(
     string? Color,
     bool IsBot,
     string AvatarUrl,
-    IReadOnlyList<RoleDto> Roles
+    IReadOnlyList<RoleDto> Roles,
+    DateTimeOffset? JoinedAt,
+    DateTimeOffset? PremiumSince,
+    DateTimeOffset? CommunicationDisabledUntil,
+    bool Pending
 );
 
 internal record AttachmentDto(string Id, string Url, string FileName, long FileSizeBytes);
@@ -84,6 +100,30 @@ internal record InteractionDto(string Id, string Name, UserDto User);
 
 internal record EmojiDto(string? Id, string Name, string Code, bool IsAnimated, string ImageUrl);
 
+internal record PollAnswerDto(int Id, string? Text, EmojiDto? Emoji, int VoteCount);
+
+internal record PollDto(
+    string Question,
+    IReadOnlyList<PollAnswerDto> Answers,
+    DateTimeOffset? Expiry,
+    bool AllowMultiselect,
+    bool IsFinalized
+);
+
+internal record PermissionOverwriteDto(string Id, string Kind, string Allow, string Deny);
+
+internal record MessageComponentDto(
+    int Type,
+    int? Style,
+    string? Label,
+    string? CustomId,
+    string? Url,
+    bool? Disabled,
+    string? Placeholder,
+    string? OptionsJson,
+    IReadOnlyList<MessageComponentDto> Children
+);
+
 // Reflection-based JSON serialization is disabled for the Cli app (it's published trimmed), so
 // every type serialized into a database JSON column needs a source-generated type info entry.
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
@@ -95,12 +135,29 @@ internal record EmojiDto(string? Id, string Name, string Code, bool IsAnimated, 
 [JsonSerializable(typeof(MessageSnapshotDto))]
 [JsonSerializable(typeof(InteractionDto))]
 [JsonSerializable(typeof(EmojiDto[]))]
+[JsonSerializable(typeof(PollDto))]
+[JsonSerializable(typeof(MessageComponentDto[]))]
+[JsonSerializable(typeof(PermissionOverwriteDto[]))]
 internal partial class DatabaseJsonContext : JsonSerializerContext;
 
 internal static class DatabaseJson
 {
     private static string? ToHex(Color? color) =>
         color is { } c ? $"#{c.R:X2}{c.G:X2}{c.B:X2}" : null;
+
+    private static RoleDto MapRole(Role role) =>
+        new(
+            role.Id.ToString(),
+            role.Name,
+            ToHex(role.Color),
+            role.Position,
+            role.Permissions.ToString(CultureInfo.InvariantCulture),
+            role.Hoist,
+            role.Mentionable,
+            role.IconUrl,
+            role.UnicodeEmoji,
+            role.Managed
+        );
 
     // Used by the offline JSON importer, which only has a Member (role IDs) plus a
     // separately-collected role lookup table, not resolved Role objects.
@@ -112,32 +169,21 @@ internal static class DatabaseJson
         BuildUserDto(
             user,
             (member?.RoleIds ?? []).Select(id => roles.GetValueOrDefault(id)).WhereNotNull(),
-            member?.DisplayName,
-            member?.AvatarUrl
+            member
         );
 
-    // Used by the live-export path, which resolves roles/nickname/avatar directly off an
-    // ExportContext instead of collecting them from a JSON file.
-    public static UserDto MapUser(
-        User user,
-        IReadOnlyList<Role> roles,
-        string? nickname,
-        string? avatarUrl
-    ) => BuildUserDto(user, roles, nickname, avatarUrl);
+    // Used by the live-export path, which resolves roles directly off an ExportContext and
+    // passes the whole Member through so nickname/avatar/join-date/etc. all come from the same
+    // place instead of being plumbed through as separate loose parameters.
+    public static UserDto MapUser(User user, Member? member, IReadOnlyList<Role> roles) =>
+        BuildUserDto(user, roles, member);
 
     private static IEnumerable<Role> WhereNotNull(this IEnumerable<Role?> roles) =>
         roles.Where(r => r is not null)!;
 
-    private static UserDto BuildUserDto(
-        User user,
-        IEnumerable<Role> roles,
-        string? nickname,
-        string? avatarUrl
-    )
+    private static UserDto BuildUserDto(User user, IEnumerable<Role> roles, Member? member)
     {
-        var roleDtos = roles
-            .Select(r => new RoleDto(r.Id.ToString(), r.Name, ToHex(r.Color), r.Position))
-            .ToArray();
+        var roleDtos = roles.Select(MapRole).ToArray();
 
         // Matches the client's "highest positioned role with a color wins" display rule.
         var effectiveColor = roleDtos
@@ -150,16 +196,23 @@ internal static class DatabaseJson
             user.Id.ToString(),
             user.Name,
             user.DiscriminatorFormatted,
-            nickname ?? user.DisplayName,
+            member?.DisplayName ?? user.DisplayName,
             effectiveColor,
             user.IsBot,
-            avatarUrl ?? user.AvatarUrl,
-            roleDtos
+            member?.AvatarUrl ?? user.AvatarUrl,
+            roleDtos,
+            member?.JoinedAt,
+            member?.PremiumSince,
+            member?.CommunicationDisabledUntil,
+            member?.Pending ?? false
         );
     }
 
     public static EmojiDto MapEmoji(EmojiNode node) =>
         new(node.Id?.ToString(), node.Name, node.Code, node.IsAnimated, node.ImageUrl);
+
+    public static EmojiDto MapEmoji(Emoji emoji) =>
+        new(emoji.Id?.ToString(), emoji.Name, emoji.Code, emoji.IsAnimated, emoji.ImageUrl);
 
     public static IReadOnlyList<EmojiDto> ExtractInlineEmojis(string content) =>
         MarkdownParser
@@ -222,7 +275,45 @@ internal static class DatabaseJson
         );
 
     public static InteractionDto MapInteraction(Interaction interaction) =>
-        new(interaction.Id.ToString(), interaction.Name, MapUser(interaction.User, [], null, null));
+        new(interaction.Id.ToString(), interaction.Name, MapUser(interaction.User, null, []));
+
+    public static PollAnswerDto MapPollAnswer(PollAnswer answer) =>
+        new(
+            answer.Id,
+            answer.Text,
+            answer.Emoji is { } emoji ? MapEmoji(emoji) : null,
+            answer.VoteCount
+        );
+
+    public static PollDto MapPoll(Poll poll) =>
+        new(
+            poll.Question,
+            poll.Answers.Select(MapPollAnswer).ToArray(),
+            poll.Expiry,
+            poll.AllowMultiselect,
+            poll.IsFinalized
+        );
+
+    public static PermissionOverwriteDto MapPermissionOverwrite(PermissionOverwrite overwrite) =>
+        new(
+            overwrite.Id.ToString(),
+            overwrite.Kind.ToString(),
+            overwrite.Allow.ToString(CultureInfo.InvariantCulture),
+            overwrite.Deny.ToString(CultureInfo.InvariantCulture)
+        );
+
+    public static MessageComponentDto MapComponent(MessageComponent component) =>
+        new(
+            component.Type,
+            component.Style,
+            component.Label,
+            component.CustomId,
+            component.Url,
+            component.Disabled,
+            component.Placeholder,
+            component.OptionsJson,
+            component.Children.Select(MapComponent).ToArray()
+        );
 
     // Returns a value suitable for direct use as a SqliteParameter value: DBNull.Value for a
     // null input, otherwise the serialized JSON string (boxed as object to match either case).
@@ -240,6 +331,11 @@ internal static class DatabaseJson
         value is null
             ? DBNull.Value
             : JsonSerializer.Serialize(value, DatabaseJsonContext.Default.InteractionDto);
+
+    public static object ToDbParam(PollDto? value) =>
+        value is null
+            ? DBNull.Value
+            : JsonSerializer.Serialize(value, DatabaseJsonContext.Default.PollDto);
 
     public static string SerializeRoles(IReadOnlyList<RoleDto> values) =>
         values.Count == 0
@@ -271,4 +367,22 @@ internal static class DatabaseJson
         values.Count == 0
             ? "[]"
             : JsonSerializer.Serialize(values.ToArray(), DatabaseJsonContext.Default.EmojiDtoArray);
+
+    public static string SerializeComponents(IReadOnlyList<MessageComponentDto> values) =>
+        values.Count == 0
+            ? "[]"
+            : JsonSerializer.Serialize(
+                values.ToArray(),
+                DatabaseJsonContext.Default.MessageComponentDtoArray
+            );
+
+    public static string SerializePermissionOverwrites(
+        IReadOnlyList<PermissionOverwriteDto> values
+    ) =>
+        values.Count == 0
+            ? "[]"
+            : JsonSerializer.Serialize(
+                values.ToArray(),
+                DatabaseJsonContext.Default.PermissionOverwriteDtoArray
+            );
 }

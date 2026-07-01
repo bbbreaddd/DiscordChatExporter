@@ -106,8 +106,45 @@ public static class ExportedChatParser
             )
             : null;
 
+        // Written by JsonMessageWriter into every export's channel header today, just never
+        // read back until now -- this is what makes channel.permission_overwrites_json
+        // backfillable via 'todatabase' without contacting Discord again.
+        var permissionOverwrites =
+            json.GetPropertyOrNull("permissionOverwrites")
+                ?.EnumerateArrayOrNull()
+                ?.Select(ParseExportedPermissionOverwrite)
+                .ToArray()
+            ?? [];
+
         // LastMessageId isn't part of the export schema
-        return new Channel(id, kind, guildId, parent, name, null, iconUrl, topic, false, null, []);
+        return new Channel(
+            id,
+            kind,
+            guildId,
+            parent,
+            name,
+            null,
+            iconUrl,
+            topic,
+            false,
+            null,
+            permissionOverwrites
+        );
+    }
+
+    // JsonMessageWriter writes the overwrite kind as its enum name (e.g. "Member"/"Role"), not
+    // the numeric REST value that PermissionOverwrite.Parse expects, so the export schema needs
+    // its own parse routine rather than reusing that one.
+    private static PermissionOverwrite ParseExportedPermissionOverwrite(JsonElement json)
+    {
+        var id = json.GetProperty("id").GetNonWhiteSpaceString().Pipe(Snowflake.Parse);
+        var kind = json.GetProperty("type")
+            .GetNonNullString()
+            .Pipe(s => Enum.Parse<PermissionOverwriteKind>(s));
+        var allow = json.GetProperty("allow").GetNonNullString().Pipe(ulong.Parse);
+        var deny = json.GetProperty("deny").GetNonNullString().Pipe(ulong.Parse);
+
+        return new PermissionOverwrite(id, kind, allow, deny);
     }
 
     // Collects member/role info embedded in a user object from the export schema. Entries

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using DiscordChatExporter.Core.Discord;
@@ -68,6 +69,18 @@ public sealed class SqliteExportStore : IAsyncDisposable
         return store;
     }
 
+    // Ordered, one-way steps applied to bring an existing database file up to the current
+    // schema. Each entry's SQL must be safe to run against whatever a database left at the
+    // previous version actually looks like (i.e. purely additive: new tables/columns/indexes/
+    // triggers, never a destructive rewrite), since production files may be sitting at any
+    // version already applied to them. Append new (version, sql) pairs here as the schema grows;
+    // never edit or reorder an existing entry.
+    private static readonly (int Version, string Sql)[] Migrations =
+    [
+        (1, Schema.V1),
+        (2, Schema.V2),
+    ];
+
     private async Task MigrateAsync(CancellationToken cancellationToken)
     {
         long userVersion;
@@ -77,13 +90,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
             userVersion = (long)(await command.ExecuteScalarAsync(cancellationToken))!;
         }
 
-        // Schema is fixed at version 1 for now; bump this and branch here when it changes.
-        if (userVersion >= 1)
-            return;
+        foreach (var (version, sql) in Migrations)
+        {
+            if (userVersion >= version)
+                continue;
 
-        await using var migration = _connection.CreateCommand();
-        migration.CommandText = Schema.CreateStatements + "\nPRAGMA user_version = 1;";
-        await migration.ExecuteNonQueryAsync(cancellationToken);
+            await using var migration = _connection.CreateCommand();
+            migration.CommandText = sql + $"\nPRAGMA user_version = {version};";
+            await migration.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private SqliteCommand CreateCommand(string sql)
@@ -187,14 +202,25 @@ public sealed class SqliteExportStore : IAsyncDisposable
         {
             await EnsureTransactionAsync(cancellationToken);
 
+            var permissionOverwritesJson =
+                channel.PermissionOverwrites.Count > 0
+                    ? DatabaseJson.SerializePermissionOverwrites(
+                        channel
+                            .PermissionOverwrites.Select(DatabaseJson.MapPermissionOverwrite)
+                            .ToArray()
+                    )
+                    : null;
+
             await using var command = CreateCommand(
                 """
                 INSERT INTO channel (
                     id, guild_id, kind, category_id, category, parent_category_id,
-                    parent_category, name, topic, position, is_archived
+                    parent_category, name, topic, position, is_archived, nsfw,
+                    slowmode_seconds, bitrate, user_limit, permission_overwrites_json
                 ) VALUES (
                     $id, $guildId, $kind, $categoryId, $category, $parentCategoryId,
-                    $parentCategory, $name, $topic, $position, $isArchived
+                    $parentCategory, $name, $topic, $position, $isArchived, $nsfw,
+                    $slowmodeSeconds, $bitrate, $userLimit, $permissionOverwritesJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     guild_id = excluded.guild_id,
@@ -206,7 +232,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     name = excluded.name,
                     topic = excluded.topic,
                     position = excluded.position,
-                    is_archived = excluded.is_archived;
+                    is_archived = excluded.is_archived,
+                    nsfw = excluded.nsfw,
+                    slowmode_seconds = excluded.slowmode_seconds,
+                    bitrate = excluded.bitrate,
+                    user_limit = excluded.user_limit,
+                    permission_overwrites_json = excluded.permission_overwrites_json;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(channel.Id));
@@ -226,6 +257,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$topic", OrNull(channel.Topic));
             command.Parameters.AddWithValue("$position", OrNull(channel.Position));
             command.Parameters.AddWithValue("$isArchived", channel.IsArchived ? 1 : 0);
+            command.Parameters.AddWithValue("$nsfw", channel.IsNsfw ? 1 : 0);
+            command.Parameters.AddWithValue("$slowmodeSeconds", OrNull(channel.SlowmodeSeconds));
+            command.Parameters.AddWithValue("$bitrate", OrNull(channel.Bitrate));
+            command.Parameters.AddWithValue("$userLimit", OrNull(channel.UserLimit));
+            command.Parameters.AddWithValue(
+                "$permissionOverwritesJson",
+                OrNull(permissionOverwritesJson)
+            );
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
@@ -385,19 +424,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     ) => UpsertUserCoreAsync(user.Id, DatabaseJson.MapUser(user, member, roles), cancellationToken);
 
-    // Used by the live-export path, which resolves roles/nickname/avatar off an ExportContext.
+    // Used by the live-export path, which resolves roles off an ExportContext and passes the
+    // whole Member through (rather than two loose nickname/avatar strings) so joined_at/
+    // premium_since/communication_disabled_until/pending are available at the same call site.
     public ValueTask UpsertUserAsync(
         User user,
+        Member? member,
         IReadOnlyList<Role> roles,
-        string? nickname,
-        string? avatarUrl,
         CancellationToken cancellationToken = default
-    ) =>
-        UpsertUserCoreAsync(
-            user.Id,
-            DatabaseJson.MapUser(user, roles, nickname, avatarUrl),
-            cancellationToken
-        );
+    ) => UpsertUserCoreAsync(user.Id, DatabaseJson.MapUser(user, member, roles), cancellationToken);
 
     private async ValueTask UpsertUserCoreAsync(
         Snowflake userId,
@@ -413,9 +448,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await using var command = CreateCommand(
                 """
                 INSERT INTO "user" (
-                    id, is_bot, discriminator, name, display_name, color, avatar_url, roles_json
+                    id, is_bot, discriminator, name, display_name, color, avatar_url, roles_json,
+                    joined_at, premium_since, communication_disabled_until, pending
                 ) VALUES (
-                    $id, $isBot, $discriminator, $name, $displayName, $color, $avatarUrl, $rolesJson
+                    $id, $isBot, $discriminator, $name, $displayName, $color, $avatarUrl, $rolesJson,
+                    $joinedAt, $premiumSince, $communicationDisabledUntil, $pending
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     is_bot = excluded.is_bot,
@@ -424,7 +461,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     display_name = excluded.display_name,
                     color = excluded.color,
                     avatar_url = excluded.avatar_url,
-                    roles_json = excluded.roles_json;
+                    roles_json = excluded.roles_json,
+                    joined_at = excluded.joined_at,
+                    premium_since = excluded.premium_since,
+                    communication_disabled_until = excluded.communication_disabled_until,
+                    pending = excluded.pending;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(userId));
@@ -435,6 +476,19 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$color", OrNull(dto.Color));
             command.Parameters.AddWithValue("$avatarUrl", dto.AvatarUrl);
             command.Parameters.AddWithValue("$rolesJson", DatabaseJson.SerializeRoles(dto.Roles));
+            command.Parameters.AddWithValue(
+                "$joinedAt",
+                OrNull(dto.JoinedAt?.ToString("O", CultureInfo.InvariantCulture))
+            );
+            command.Parameters.AddWithValue(
+                "$premiumSince",
+                OrNull(dto.PremiumSince?.ToString("O", CultureInfo.InvariantCulture))
+            );
+            command.Parameters.AddWithValue(
+                "$communicationDisabledUntil",
+                OrNull(dto.CommunicationDisabledUntil?.ToString("O", CultureInfo.InvariantCulture))
+            );
+            command.Parameters.AddWithValue("$pending", dto.Pending ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
@@ -490,6 +544,23 @@ public sealed class SqliteExportStore : IAsyncDisposable
         var inlineEmojisJson =
             inlineEmojis.Count > 0 ? DatabaseJson.SerializeInlineEmojis(inlineEmojis) : null;
 
+        var pollJson = message.Poll is { } poll
+            ? JsonSerializer.Serialize(
+                DatabaseJson.MapPoll(poll),
+                DatabaseJsonContext.Default.PollDto
+            )
+            : null;
+
+        var componentsJson =
+            message.Components.Count > 0
+                ? DatabaseJson.SerializeComponents(
+                    message.Components.Select(DatabaseJson.MapComponent).ToArray()
+                )
+                : null;
+
+        // deleted_at is deliberately absent from this INSERT/UPDATE: a normal upsert must never
+        // clear a soft-delete marker if a stale re-export happens to touch the row later. Only
+        // MarkMessageDeletedAsync ever sets it.
         await using (
             var command = CreateCommand(
                 """
@@ -497,12 +568,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     id, channel_id, author_id, kind, timestamp, edited_timestamp,
                     call_ended_timestamp, is_pinned, content, reference_json,
                     forwarded_message_json, interaction_json, embeds_json, stickers_json,
-                    inline_emojis_json
+                    inline_emojis_json, webhook_id, poll_json, components_json
                 ) VALUES (
                     $id, $channelId, $authorId, $kind, $timestamp, $editedTimestamp,
                     $callEndedTimestamp, $isPinned, $content, $referenceJson,
                     $forwardedMessageJson, $interactionJson, $embedsJson, $stickersJson,
-                    $inlineEmojisJson
+                    $inlineEmojisJson, $webhookId, $pollJson, $componentsJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     channel_id = excluded.channel_id,
@@ -518,7 +589,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     interaction_json = excluded.interaction_json,
                     embeds_json = excluded.embeds_json,
                     stickers_json = excluded.stickers_json,
-                    inline_emojis_json = excluded.inline_emojis_json;
+                    inline_emojis_json = excluded.inline_emojis_json,
+                    webhook_id = excluded.webhook_id,
+                    poll_json = excluded.poll_json,
+                    components_json = excluded.components_json;
                 """
             )
         )
@@ -566,6 +640,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$embedsJson", OrNull(embedsJson));
             command.Parameters.AddWithValue("$stickersJson", OrNull(stickersJson));
             command.Parameters.AddWithValue("$inlineEmojisJson", OrNull(inlineEmojisJson));
+            command.Parameters.AddWithValue("$webhookId", ToDbId(message.WebhookId));
+            command.Parameters.AddWithValue("$pollJson", OrNull(pollJson));
+            command.Parameters.AddWithValue("$componentsJson", OrNull(componentsJson));
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -666,6 +743,261 @@ public sealed class SqliteExportStore : IAsyncDisposable
             insertMention.Parameters.AddWithValue("$messageId", messageIdDb);
             insertMention.Parameters.AddWithValue("$userId", ToDbId(mentioned.Id));
             await insertMention.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    // Marks a message as deleted without contacting Discord -- by the time this is called the
+    // message is already gone, so there's nothing left to fetch. The row and its content are
+    // preserved; only deleted_at is set (and only if it wasn't already), which is also what
+    // stops a later stale re-export/patch from ever reviving it (see UpsertMessageCoreAsync,
+    // which never touches this column).
+    public async ValueTask MarkMessageDeletedAsync(
+        Snowflake messageId,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                UPDATE message SET deleted_at = $deletedAt
+                WHERE id = $id AND deleted_at IS NULL;
+                """
+            );
+            command.Parameters.AddWithValue(
+                "$deletedAt",
+                deletedAt.ToString("O", CultureInfo.InvariantCulture)
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(messageId));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask UpsertRoleAsync(
+        Role role,
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO role (
+                    id, guild_id, name, color, position, permissions, hoist, mentionable,
+                    icon_url, unicode_emoji, managed
+                ) VALUES (
+                    $id, $guildId, $name, $color, $position, $permissions, $hoist, $mentionable,
+                    $iconUrl, $unicodeEmoji, $managed
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    name = excluded.name,
+                    color = excluded.color,
+                    position = excluded.position,
+                    permissions = excluded.permissions,
+                    hoist = excluded.hoist,
+                    mentionable = excluded.mentionable,
+                    icon_url = excluded.icon_url,
+                    unicode_emoji = excluded.unicode_emoji,
+                    managed = excluded.managed;
+                """
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(role.Id));
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+            command.Parameters.AddWithValue("$name", role.Name);
+            command.Parameters.AddWithValue(
+                "$color",
+                OrNull(role.Color is { } c ? $"#{c.R:X2}{c.G:X2}{c.B:X2}" : null)
+            );
+            command.Parameters.AddWithValue("$position", role.Position);
+            command.Parameters.AddWithValue(
+                "$permissions",
+                role.Permissions.ToString(CultureInfo.InvariantCulture)
+            );
+            command.Parameters.AddWithValue("$hoist", role.Hoist ? 1 : 0);
+            command.Parameters.AddWithValue("$mentionable", role.Mentionable ? 1 : 0);
+            command.Parameters.AddWithValue("$iconUrl", OrNull(role.IconUrl));
+            command.Parameters.AddWithValue("$unicodeEmoji", OrNull(role.UnicodeEmoji));
+            command.Parameters.AddWithValue("$managed", role.Managed ? 1 : 0);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask UpsertGuildEmojiAsync(
+        GuildEmoji emoji,
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO guild_emoji (
+                    id, guild_id, name, is_animated, image_url, creator_id, is_available, is_managed
+                ) VALUES (
+                    $id, $guildId, $name, $isAnimated, $imageUrl, $creatorId, $isAvailable, $isManaged
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    name = excluded.name,
+                    is_animated = excluded.is_animated,
+                    image_url = excluded.image_url,
+                    creator_id = excluded.creator_id,
+                    is_available = excluded.is_available,
+                    is_managed = excluded.is_managed;
+                """
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(emoji.Id));
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+            command.Parameters.AddWithValue("$name", emoji.Name);
+            command.Parameters.AddWithValue("$isAnimated", emoji.IsAnimated ? 1 : 0);
+            command.Parameters.AddWithValue("$imageUrl", emoji.ImageUrl);
+            command.Parameters.AddWithValue("$creatorId", ToDbId(emoji.CreatorId));
+            command.Parameters.AddWithValue("$isAvailable", emoji.IsAvailable ? 1 : 0);
+            command.Parameters.AddWithValue("$isManaged", emoji.IsManaged ? 1 : 0);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask UpsertGuildStickerAsync(
+        GuildSticker sticker,
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO guild_sticker (
+                    id, guild_id, name, description, tags, format, source_url, creator_id, is_available
+                ) VALUES (
+                    $id, $guildId, $name, $description, $tags, $format, $sourceUrl, $creatorId, $isAvailable
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    name = excluded.name,
+                    description = excluded.description,
+                    tags = excluded.tags,
+                    format = excluded.format,
+                    source_url = excluded.source_url,
+                    creator_id = excluded.creator_id,
+                    is_available = excluded.is_available;
+                """
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(sticker.Id));
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+            command.Parameters.AddWithValue("$name", sticker.Name);
+            command.Parameters.AddWithValue("$description", OrNull(sticker.Description));
+            command.Parameters.AddWithValue("$tags", OrNull(sticker.Tags));
+            command.Parameters.AddWithValue("$format", sticker.Format.ToString());
+            command.Parameters.AddWithValue("$sourceUrl", sticker.SourceUrl);
+            command.Parameters.AddWithValue("$creatorId", ToDbId(sticker.CreatorId));
+            command.Parameters.AddWithValue("$isAvailable", sticker.IsAvailable ? 1 : 0);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask UpsertScheduledEventAsync(
+        ScheduledEvent scheduledEvent,
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO scheduled_event (
+                    id, guild_id, channel_id, creator_id, name, description, start_time,
+                    end_time, status, entity_type, location, cover_image_url, user_count
+                ) VALUES (
+                    $id, $guildId, $channelId, $creatorId, $name, $description, $startTime,
+                    $endTime, $status, $entityType, $location, $coverImageUrl, $userCount
+                )
+                ON CONFLICT(id) DO UPDATE SET
+                    guild_id = excluded.guild_id,
+                    channel_id = excluded.channel_id,
+                    creator_id = excluded.creator_id,
+                    name = excluded.name,
+                    description = excluded.description,
+                    start_time = excluded.start_time,
+                    end_time = excluded.end_time,
+                    status = excluded.status,
+                    entity_type = excluded.entity_type,
+                    location = excluded.location,
+                    cover_image_url = excluded.cover_image_url,
+                    user_count = excluded.user_count;
+                """
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(scheduledEvent.Id));
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+            command.Parameters.AddWithValue("$channelId", ToDbId(scheduledEvent.ChannelId));
+            command.Parameters.AddWithValue("$creatorId", ToDbId(scheduledEvent.CreatorId));
+            command.Parameters.AddWithValue("$name", scheduledEvent.Name);
+            command.Parameters.AddWithValue("$description", OrNull(scheduledEvent.Description));
+            command.Parameters.AddWithValue(
+                "$startTime",
+                scheduledEvent.StartTime.ToString("O", CultureInfo.InvariantCulture)
+            );
+            command.Parameters.AddWithValue(
+                "$endTime",
+                OrNull(scheduledEvent.EndTime?.ToString("O", CultureInfo.InvariantCulture))
+            );
+            command.Parameters.AddWithValue("$status", scheduledEvent.Status.ToString());
+            command.Parameters.AddWithValue("$entityType", scheduledEvent.EntityType.ToString());
+            command.Parameters.AddWithValue("$location", OrNull(scheduledEvent.Location));
+            command.Parameters.AddWithValue("$coverImageUrl", OrNull(scheduledEvent.CoverImageUrl));
+            command.Parameters.AddWithValue("$userCount", OrNull(scheduledEvent.UserCount));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 

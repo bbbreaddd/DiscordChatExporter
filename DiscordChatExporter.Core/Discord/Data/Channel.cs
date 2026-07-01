@@ -19,7 +19,11 @@ public partial record Channel(
     string? Topic,
     bool IsArchived,
     Snowflake? LastMessageId,
-    IReadOnlyList<PermissionOverwrite> PermissionOverwrites
+    IReadOnlyList<PermissionOverwrite> PermissionOverwrites,
+    bool IsNsfw = false,
+    int? SlowmodeSeconds = null,
+    int? Bitrate = null,
+    int? UserLimit = null
 ) : IHasId
 {
     public bool IsDirect { get; } =
@@ -112,6 +116,11 @@ public partial record Channel
                 .ToArray()
             ?? [];
 
+        var isNsfw = json.GetPropertyOrNull("nsfw")?.GetBooleanOrNull() ?? false;
+        var slowmodeSeconds = json.GetPropertyOrNull("rate_limit_per_user")?.GetInt32OrNull();
+        var bitrate = json.GetPropertyOrNull("bitrate")?.GetInt32OrNull();
+        var userLimit = json.GetPropertyOrNull("user_limit")?.GetInt32OrNull();
+
         return new Channel(
             id,
             kind,
@@ -123,7 +132,11 @@ public partial record Channel
             topic,
             isArchived,
             lastMessageId,
-            permissionOverwrites
+            permissionOverwrites,
+            isNsfw,
+            slowmodeSeconds,
+            bitrate,
+            userLimit
         );
     }
 }

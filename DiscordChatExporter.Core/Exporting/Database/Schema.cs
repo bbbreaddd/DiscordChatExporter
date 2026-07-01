@@ -4,7 +4,7 @@ internal static class Schema
 {
     // "user" is quoted throughout because USER, while not reserved in SQLite's own grammar, is
     // reserved in the ANSI SQL standard that most tooling (and humans) assume applies everywhere.
-    public const string CreateStatements = """
+    public const string V1 = """
         CREATE TABLE IF NOT EXISTS guild (
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
@@ -108,6 +108,91 @@ internal static class Schema
         CREATE TRIGGER IF NOT EXISTS message_au AFTER UPDATE ON message BEGIN
             INSERT INTO message_fts(message_fts, rowid, content) VALUES ('delete', old.id, old.content);
             INSERT INTO message_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        """;
+
+    // Additive only: every statement here either adds a nullable/defaulted column to an existing
+    // table or creates a new table/index/trigger, so it's always safe to run against a database
+    // that already holds rows written under V1. Note: SQLite's ALTER TABLE ADD COLUMN has no
+    // "IF NOT EXISTS" form at all (unlike CREATE TABLE/INDEX/TRIGGER, which do) -- confirmed
+    // against the bundled sqlite3, which rejects that syntax outright. That's fine here: the
+    // PRAGMA user_version gate in MigrateAsync already guarantees this whole block only ever
+    // runs once per database, so idempotency doesn't need to be re-derived at the statement level.
+    public const string V2 = """
+        ALTER TABLE message ADD COLUMN webhook_id INTEGER;
+        ALTER TABLE message ADD COLUMN poll_json TEXT;
+        ALTER TABLE message ADD COLUMN components_json TEXT;
+        ALTER TABLE message ADD COLUMN deleted_at TEXT;
+
+        ALTER TABLE channel ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE channel ADD COLUMN slowmode_seconds INTEGER;
+        ALTER TABLE channel ADD COLUMN bitrate INTEGER;
+        ALTER TABLE channel ADD COLUMN user_limit INTEGER;
+        ALTER TABLE channel ADD COLUMN permission_overwrites_json TEXT;
+
+        ALTER TABLE "user" ADD COLUMN joined_at TEXT;
+        ALTER TABLE "user" ADD COLUMN premium_since TEXT;
+        ALTER TABLE "user" ADD COLUMN communication_disabled_until TEXT;
+        ALTER TABLE "user" ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+
+        CREATE TABLE IF NOT EXISTS role (
+            id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL REFERENCES guild(id),
+            name TEXT NOT NULL, color TEXT, position INTEGER NOT NULL,
+            permissions TEXT NOT NULL,
+            hoist INTEGER NOT NULL DEFAULT 0, mentionable INTEGER NOT NULL DEFAULT 0,
+            icon_url TEXT, unicode_emoji TEXT, managed INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS guild_emoji (
+            id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL REFERENCES guild(id),
+            name TEXT NOT NULL, is_animated INTEGER NOT NULL DEFAULT 0, image_url TEXT NOT NULL,
+            creator_id INTEGER, is_available INTEGER NOT NULL DEFAULT 1, is_managed INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS guild_sticker (
+            id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL REFERENCES guild(id),
+            name TEXT NOT NULL, description TEXT, tags TEXT, format TEXT NOT NULL,
+            source_url TEXT NOT NULL, creator_id INTEGER, is_available INTEGER NOT NULL DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduled_event (
+            id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL REFERENCES guild(id),
+            channel_id INTEGER, creator_id INTEGER, name TEXT NOT NULL, description TEXT,
+            start_time TEXT NOT NULL, end_time TEXT, status TEXT NOT NULL, entity_type TEXT NOT NULL,
+            location TEXT, cover_image_url TEXT, user_count INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS message_edit_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            content TEXT NOT NULL, edited_timestamp TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS message_edit_history_message ON message_edit_history(message_id);
+
+        CREATE TABLE IF NOT EXISTS message_pin_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL, is_pinned INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS message_pin_event_message ON message_pin_event(message_id);
+
+        -- These two triggers are the entire implementation of edit-history and pin-history: they
+        -- fire on the existing upsert path (the same one the FTS sync trigger already relies on
+        -- for every INSERT ... ON CONFLICT DO UPDATE), so no additional C# write-path changes are
+        -- needed for either feature beyond adding the deleted_at/webhook_id/poll/components
+        -- columns to the same statement.
+        CREATE TRIGGER IF NOT EXISTS message_edit_history_ai AFTER UPDATE OF content ON message
+            WHEN OLD.content != NEW.content BEGIN
+            INSERT INTO message_edit_history (message_id, content, edited_timestamp, recorded_at)
+            VALUES (OLD.id, OLD.content, OLD.edited_timestamp, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS message_pin_event_ai AFTER UPDATE OF is_pinned ON message
+            WHEN OLD.is_pinned != NEW.is_pinned BEGIN
+            INSERT INTO message_pin_event (message_id, channel_id, is_pinned, recorded_at)
+            VALUES (NEW.id, NEW.channel_id, NEW.is_pinned, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
         END;
         """;
 }

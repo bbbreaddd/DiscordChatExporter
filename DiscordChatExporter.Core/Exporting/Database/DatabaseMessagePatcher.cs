@@ -45,9 +45,8 @@ public static class DatabaseMessagePatcher
 
             await store.UpsertUserAsync(
                 user,
+                member,
                 context.GetUserRoles(user.Id),
-                member?.DisplayName,
-                member?.AvatarUrl,
                 cancellationToken
             );
         }

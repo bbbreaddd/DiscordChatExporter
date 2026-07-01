@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -12,7 +13,11 @@ public partial record Member(
     User User,
     string? DisplayName,
     string? AvatarUrl,
-    IReadOnlyList<Snowflake> RoleIds
+    IReadOnlyList<Snowflake> RoleIds,
+    DateTimeOffset? JoinedAt = null,
+    DateTimeOffset? PremiumSince = null,
+    DateTimeOffset? CommunicationDisabledUntil = null,
+    bool Pending = false
 ) : IHasId
 {
     public Snowflake Id { get; } = User.Id;
@@ -41,6 +46,21 @@ public partial record Member
                 ?.Pipe(h => ImageCdn.GetMemberAvatarUrl(guildId.Value, user.Id, h))
             : null;
 
-        return new Member(user, displayName, avatarUrl, roleIds);
+        var joinedAt = json.GetPropertyOrNull("joined_at")?.GetDateTimeOffsetOrNull();
+        var premiumSince = json.GetPropertyOrNull("premium_since")?.GetDateTimeOffsetOrNull();
+        var communicationDisabledUntil = json.GetPropertyOrNull("communication_disabled_until")
+            ?.GetDateTimeOffsetOrNull();
+        var pending = json.GetPropertyOrNull("pending")?.GetBooleanOrNull() ?? false;
+
+        return new Member(
+            user,
+            displayName,
+            avatarUrl,
+            roleIds,
+            joinedAt,
+            premiumSince,
+            communicationDisabledUntil,
+            pending
+        );
     }
 }

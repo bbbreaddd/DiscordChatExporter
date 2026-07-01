@@ -62,4 +62,13 @@ public static class ImageCdn
 
     public static string GetStickerUrl(Snowflake stickerId, string format = "png") =>
         $"https://cdn.discordapp.com/stickers/{stickerId}.{format}";
+
+    public static string GetRoleIconUrl(Snowflake roleId, string iconHash, int size = 512) =>
+        $"https://cdn.discordapp.com/role-icons/{roleId}/{iconHash}.png?size={size}";
+
+    public static string GetScheduledEventCoverUrl(
+        Snowflake eventId,
+        string imageHash,
+        int size = 512
+    ) => $"https://cdn.discordapp.com/guild-events/{eventId}/{imageHash}.png?size={size}";
 }

@@ -141,6 +141,8 @@ internal class ExportContext(
 
     public Role? TryGetRole(Snowflake id) => _rolesById.GetValueOrDefault(id);
 
+    public IReadOnlyDictionary<Snowflake, Role> Roles => _rolesById;
+
     public IReadOnlyList<Role> GetUserRoles(Snowflake id) =>
         TryGetMember(id)
             ?.RoleIds.Select(TryGetRole)

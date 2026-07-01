@@ -71,6 +71,9 @@ public class ChannelExporter(DiscordClient discord)
         var context = new ExportContext(discord, request);
         await context.PopulateChannelsAndRolesAsync(cancellationToken);
 
+        foreach (var role in context.Roles.Values)
+            await databaseStore.UpsertRoleAsync(role, request.Guild.Id, cancellationToken);
+
         var messages = !request.IsReverseMessageOrder
             ? discord.GetMessagesAsync(
                 request.Channel.Id,
@@ -100,9 +103,8 @@ public class ChannelExporter(DiscordClient discord)
 
                     await databaseStore.UpsertUserAsync(
                         user,
+                        member,
                         context.GetUserRoles(user.Id),
-                        member?.DisplayName,
-                        member?.AvatarUrl,
                         cancellationToken
                     );
                 }

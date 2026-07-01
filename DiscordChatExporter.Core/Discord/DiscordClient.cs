@@ -576,6 +576,48 @@ public class DiscordClient
             yield return Role.Parse(roleJson);
     }
 
+    public async IAsyncEnumerable<GuildEmoji> GetGuildEmojisAsync(
+        Snowflake guildId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        if (guildId == Guild.DirectMessages.Id)
+            yield break;
+
+        var response = await GetJsonResponseAsync($"guilds/{guildId}/emojis", cancellationToken);
+        foreach (var emojiJson in response.EnumerateArray())
+            yield return GuildEmoji.Parse(emojiJson);
+    }
+
+    public async IAsyncEnumerable<GuildSticker> GetGuildStickersAsync(
+        Snowflake guildId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        if (guildId == Guild.DirectMessages.Id)
+            yield break;
+
+        var response = await GetJsonResponseAsync($"guilds/{guildId}/stickers", cancellationToken);
+        foreach (var stickerJson in response.EnumerateArray())
+            yield return GuildSticker.Parse(stickerJson);
+    }
+
+    public async IAsyncEnumerable<ScheduledEvent> GetGuildScheduledEventsAsync(
+        Snowflake guildId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        if (guildId == Guild.DirectMessages.Id)
+            yield break;
+
+        var response = await GetJsonResponseAsync(
+            $"guilds/{guildId}/scheduled-events",
+            cancellationToken
+        );
+        foreach (var eventJson in response.EnumerateArray())
+            yield return ScheduledEvent.Parse(eventJson);
+    }
+
     public async ValueTask<Member?> TryGetGuildMemberAsync(
         Snowflake guildId,
         Snowflake memberId,

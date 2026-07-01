@@ -413,6 +413,54 @@ public abstract class ExportCommandBase : DiscordCommandBase
                 ? await SqliteExportStore.OpenAsync(OutputPath, cancellationToken)
                 : null;
 
+        // Refresh each distinct guild's emoji/sticker/scheduled-event catalog once per
+        // invocation (not per channel -- export/exportguild both funnel through here) rather
+        // than gateway-driven, so these opportunistically stay current on every debounced live
+        // export the watcher already runs, without new plumbing for the export path itself.
+        // Guarded with a HashSet since 'export -c' could in principle span channels from
+        // different guilds even though today's usage is single-guild.
+        if (databaseStore is not null)
+        {
+            var syncedGuildIds = new HashSet<Snowflake>();
+            foreach (var channel in channels)
+            {
+                if (!syncedGuildIds.Add(channel.GuildId))
+                    continue;
+
+                await foreach (
+                    var emoji in Discord.GetGuildEmojisAsync(channel.GuildId, cancellationToken)
+                )
+                    await databaseStore.UpsertGuildEmojiAsync(
+                        emoji,
+                        channel.GuildId,
+                        cancellationToken
+                    );
+
+                await foreach (
+                    var sticker in Discord.GetGuildStickersAsync(channel.GuildId, cancellationToken)
+                )
+                    await databaseStore.UpsertGuildStickerAsync(
+                        sticker,
+                        channel.GuildId,
+                        cancellationToken
+                    );
+
+                await foreach (
+                    var scheduledEvent in Discord.GetGuildScheduledEventsAsync(
+                        channel.GuildId,
+                        cancellationToken
+                    )
+                )
+                    await databaseStore.UpsertScheduledEventAsync(
+                        scheduledEvent,
+                        channel.GuildId,
+                        cancellationToken
+                    );
+            }
+
+            await databaseStore.FlushAsync(cancellationToken);
+        }
+
         try
         {
             await console.Output.WriteLineAsync("Exporting channels...");

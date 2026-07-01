@@ -28,9 +28,14 @@ public partial record Message(
     MessageReference? Reference,
     Message? ReferencedMessage,
     MessageSnapshot? ForwardedMessage,
-    Interaction? Interaction
+    Interaction? Interaction,
+    Snowflake? WebhookId = null,
+    Poll? Poll = null,
+    IReadOnlyList<MessageComponent>? Components = null
 ) : IHasId
 {
+    public IReadOnlyList<MessageComponent> Components { get; } = Components ?? [];
+
     public bool IsEmpty { get; } =
         string.IsNullOrWhiteSpace(Content)
         && !Attachments.Any()
@@ -187,6 +192,19 @@ public partial record Message
 
         var interaction = json.GetPropertyOrNull("interaction")?.Pipe(Interaction.Parse);
 
+        var webhookId = json.GetPropertyOrNull("webhook_id")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
+
+        var poll = json.GetPropertyOrNull("poll")?.Pipe(Poll.Parse);
+
+        var components =
+            json.GetPropertyOrNull("components")
+                ?.EnumerateArrayOrNull()
+                ?.Select(MessageComponent.Parse)
+                .ToArray()
+            ?? [];
+
         return new Message(
             id,
             kind,
@@ -205,7 +223,10 @@ public partial record Message
             messageReference,
             referencedMessage,
             forwardedMessage,
-            interaction
+            interaction,
+            webhookId,
+            poll,
+            components
         );
     }
 }
