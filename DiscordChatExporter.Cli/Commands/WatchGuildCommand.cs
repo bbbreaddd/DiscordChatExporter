@@ -41,6 +41,22 @@ public partial class WatchGuildCommand : DiscordCommandBase
     public ExportFormat ExportFormat { get; set; } = ExportFormat.Db;
 
     [CommandOption(
+        "media",
+        Description = "Download Discord media referenced by the database export."
+    )]
+    public bool ShouldDownloadAssets { get; set; }
+
+    [CommandOption(
+        "media-dir",
+        Description = "Download media to this directory. If not specified, the media directory will be derived from the output path."
+    )]
+    public string? AssetsDirPath
+    {
+        get;
+        set => field = value is not null ? Path.GetFullPath(value) : null;
+    }
+
+    [CommandOption(
         "catch-up",
         Description = "Queue all guild channels/threads for export after connection."
     )]
@@ -73,6 +89,9 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
         if (ExportFormat != ExportFormat.Db)
             throw new CommandException("Option --format only supports 'Db' for watchguild.");
+
+        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
+            throw new CommandException("Option --media-dir cannot be used without --media.");
 
         // Single-instance guard, scoped per-database. Two watchers (or a watcher plus a separate
         // `export --format Db` run) writing to the same file would each open a writer connection;
@@ -110,7 +129,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
             $"Starting watchguild for guild {GuildId} into '{OutputPath}'..."
         );
 
-        await using var store = await SqliteExportStore.OpenAsync(OutputPath, cancellationToken);
+        await using var store = await SqliteExportStore.OpenAsync(
+            OutputPath,
+            ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+            cancellationToken
+        );
 
         var gatewayClient = new GatewayClient(firstToken);
 
@@ -396,6 +419,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     case "MESSAGE_REACTION_REMOVE":
                     case "MESSAGE_REACTION_REMOVE_ALL":
                     case "MESSAGE_REACTION_REMOVE_EMOJI":
+                    case "MESSAGE_POLL_VOTE_ADD":
+                    case "MESSAGE_POLL_VOTE_REMOVE":
                         {
                             var channelId = Snowflake.Parse(
                                 data.GetProperty("channel_id").GetString()!

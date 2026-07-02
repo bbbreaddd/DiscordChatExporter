@@ -6,7 +6,8 @@ using PowerKit.Extensions;
 namespace DiscordChatExporter.Core.Discord.Data;
 
 // https://discord.com/developers/docs/resources/guild#guild-object
-public partial record Guild(Snowflake Id, string Name, string IconUrl) : IHasId
+public partial record Guild(Snowflake Id, string Name, string IconUrl, string? BannerUrl = null)
+    : IHasId
 {
     public bool IsDirect { get; } = Id == Snowflake.Zero;
 }
@@ -28,6 +29,10 @@ public partial record Guild
                 ?.Pipe(h => ImageCdn.GetGuildIconUrl(id, h))
             ?? ImageCdn.GetFallbackUserAvatarUrl();
 
-        return new Guild(id, name, iconUrl);
+        var bannerUrl = json.GetPropertyOrNull("banner")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => ImageCdn.GetGuildBannerUrl(id, h));
+
+        return new Guild(id, name, iconUrl, bannerUrl);
     }
 }

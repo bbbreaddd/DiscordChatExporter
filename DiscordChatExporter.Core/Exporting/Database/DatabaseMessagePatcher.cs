@@ -34,6 +34,7 @@ public static class DatabaseMessagePatcher
 
         await using var store = await SqliteExportStore.OpenAsync(
             databaseFilePath,
+            request.ShouldDownloadAssets ? request.AssetsDirPath : null,
             cancellationToken
         );
 

@@ -14,6 +14,8 @@ using PowerKit.Extensions;
 
 namespace DiscordChatExporter.Core.Exporting;
 
+internal record ExportAssetDownloadResult(string FilePath, long SizeBytes, string? Sha256Hash);
+
 // 'offline' makes the downloader purely local: it resolves to an already-cached file when one
 // exists, but never contacts the network. A cache miss returns null instead of downloading, so
 // the caller can keep the original remote URL. This is what the 'convert' command uses, since
@@ -21,7 +23,8 @@ namespace DiscordChatExporter.Core.Exporting;
 internal partial class ExportAssetDownloader(
     string workingDirPath,
     bool reuse,
-    bool offline = false
+    bool offline = false,
+    Func<string, string>? getRelativeFilePath = null
 )
 {
     private static readonly AsyncKeyedLocker<string> Locker = new();
@@ -52,17 +55,44 @@ internal partial class ExportAssetDownloader(
         CancellationToken cancellationToken = default
     )
     {
-        var fileName = GetFileNameFromUrl(url);
-        var filePath = Path.Combine(workingDirPath, fileName);
+        var relativeFilePath = getRelativeFilePath?.Invoke(url) ?? GetFileNameFromUrl(url);
+        return await DownloadAsync(url, downloadUrl, relativeFilePath, cancellationToken);
+    }
+
+    public async ValueTask<string?> DownloadAsync(
+        string url,
+        string downloadUrl,
+        string relativeFilePath,
+        CancellationToken cancellationToken = default
+    ) =>
+        (
+            await DownloadWithInfoAsync(
+                url,
+                downloadUrl,
+                relativeFilePath,
+                hashMaxBytes: null,
+                cancellationToken
+            )
+        )?.FilePath;
+
+    public async ValueTask<ExportAssetDownloadResult?> DownloadWithInfoAsync(
+        string url,
+        string downloadUrl,
+        string relativeFilePath,
+        long? hashMaxBytes = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var filePath = Path.Combine(workingDirPath, relativeFilePath);
 
         using var _ = await Locker.LockAsync(filePath, cancellationToken);
 
         if (_previousPathsByUrl.TryGetValue(url, out var cachedFilePath))
-            return cachedFilePath;
+            return GetResult(cachedFilePath, null);
 
         // Reuse existing files if we're allowed to
         if (ShouldReuse && IsFileValid(filePath))
-            return _previousPathsByUrl[url] = filePath;
+            return GetResult(_previousPathsByUrl[url] = filePath, null);
 
         // Check for a file cached by the legacy naming scheme (5-char hash) and rename it
         // to the new naming scheme to preserve backwards compatibility with existing exports
@@ -76,7 +106,7 @@ internal partial class ExportAssetDownloader(
                 try
                 {
                     File.Move(legacyFilePath, filePath, overwrite: true);
-                    return _previousPathsByUrl[url] = filePath;
+                    return GetResult(_previousPathsByUrl[url] = filePath, null);
                 }
                 catch (IOException)
                 {
@@ -90,7 +120,7 @@ internal partial class ExportAssetDownloader(
         if (offline)
             return null;
 
-        Directory.CreateDirectory(workingDirPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? workingDirPath);
 
         // Download to a process-unique temp file and atomically rename into place, rather than
         // writing straight to 'filePath'. The in-process Locker above only guards against races
@@ -103,6 +133,8 @@ internal partial class ExportAssetDownloader(
         // independently with no collision, and the final rename is atomic -- whichever one
         // lands last simply wins with a complete file either way.
         var tempFilePath = $"{filePath}.{Guid.NewGuid():N}.tmp";
+
+        string? sha256Hash = null;
 
         try
         {
@@ -118,12 +150,45 @@ internal partial class ExportAssetDownloader(
 
                     response.EnsureSuccessStatusCode();
 
+                    await using (
+                        var input = await response.Content.ReadAsStreamAsync(innerCancellationToken)
+                    )
                     await using (var output = File.Create(tempFilePath))
                     {
-                        await response.Content.CopyToAsync(output, innerCancellationToken);
+                        using var hasher = hashMaxBytes is not null
+                            ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+                            : null;
+
+                        var buffer = new byte[81920];
+                        while (true)
+                        {
+                            var read = await input.ReadAsync(buffer, innerCancellationToken);
+                            if (read <= 0)
+                                break;
+
+                            await output.WriteAsync(
+                                buffer.AsMemory(0, read),
+                                innerCancellationToken
+                            );
+
+                            if (hasher is not null)
+                            {
+                                if (output.Length <= hashMaxBytes)
+                                {
+                                    hasher.AppendData(buffer, 0, read);
+                                }
+                                else
+                                {
+                                    hasher.Dispose();
+                                }
+                            }
+                        }
 
                         if (output.Length <= 0)
                             throw new HttpRequestException("Downloaded asset is empty.");
+
+                        if (hasher is not null && output.Length <= hashMaxBytes)
+                            sha256Hash = Convert.ToHexStringLower(hasher.GetHashAndReset());
                     }
 
                     File.Move(tempFilePath, filePath, true);
@@ -144,7 +209,23 @@ internal partial class ExportAssetDownloader(
             throw;
         }
 
-        return _previousPathsByUrl[url] = filePath;
+        return GetResult(_previousPathsByUrl[url] = filePath, sha256Hash);
+    }
+
+    private static ExportAssetDownloadResult? GetResult(string filePath, string? sha256Hash)
+    {
+        try
+        {
+            return new ExportAssetDownloadResult(
+                filePath,
+                new FileInfo(filePath).Length,
+                sha256Hash
+            );
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 }
 

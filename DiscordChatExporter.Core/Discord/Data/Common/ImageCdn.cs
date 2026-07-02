@@ -37,6 +37,11 @@ public static class ImageCdn
             ? $"https://cdn.discordapp.com/icons/{guildId}/{iconHash}.gif?size={size}"
             : $"https://cdn.discordapp.com/icons/{guildId}/{iconHash}.png?size={size}";
 
+    public static string GetGuildBannerUrl(Snowflake guildId, string bannerHash, int size = 512) =>
+        bannerHash.StartsWith("a_", StringComparison.Ordinal)
+            ? $"https://cdn.discordapp.com/banners/{guildId}/{bannerHash}.gif?size={size}"
+            : $"https://cdn.discordapp.com/banners/{guildId}/{bannerHash}.png?size={size}";
+
     public static string GetChannelIconUrl(Snowflake channelId, string iconHash, int size = 512) =>
         iconHash.StartsWith("a_", StringComparison.Ordinal)
             ? $"https://cdn.discordapp.com/channel-icons/{channelId}/{iconHash}.gif?size={size}"

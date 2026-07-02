@@ -187,6 +187,10 @@ A folder containing the assets will be created along with the exported chat. The
 ./DiscordChatExporter.Cli export -t "mfa.Ifrn" -c 53555 --media
 ```
 
+When exporting to the SQLite database format (`-f Db`) or using `watchguild --media`, Discord-hosted media is saved
+next to the database by default in a sharded media directory (for example, `attachments/ab/cd/file.png`) and the local
+paths are recorded in the database. This avoids putting very large numbers of files into one folder.
+
 #### Reusing assets
 
 Previously downloaded assets can be reused to skip redundant downloads as long as the chat is always exported to the

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -22,8 +23,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
     // Kept modest so that a single failed statement (e.g. a constraint violation from malformed
     // input) only rolls back a small, cheaply-redone batch instead of hours of prior work.
     private const int BatchSize = 2000;
+    private const long MediaDedupeMaxBytes = 50L * 1024 * 1024;
 
     private readonly SqliteConnection _connection;
+    private readonly string? _mediaDirPath;
+    private readonly ExportAssetDownloader? _mediaDownloader;
 
     // All public members serialize through this so the single underlying connection (and its
     // at-most-one open transaction) is never touched from two threads at once -- callers may
@@ -33,11 +37,24 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private SqliteTransaction? _transaction;
     private int _pendingCount;
 
-    private SqliteExportStore(SqliteConnection connection) => _connection = connection;
+    private SqliteExportStore(SqliteConnection connection, string? mediaDirPath)
+    {
+        _connection = connection;
+        _mediaDirPath = mediaDirPath;
+        _mediaDownloader = mediaDirPath is not null
+            ? new ExportAssetDownloader(mediaDirPath, reuse: true)
+            : null;
+    }
 
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         CancellationToken cancellationToken = default
+    ) => await OpenAsync(databaseFilePath, null, cancellationToken);
+
+    public static async Task<SqliteExportStore> OpenAsync(
+        string databaseFilePath,
+        string? mediaDirPath,
+        CancellationToken cancellationToken
     )
     {
         var directoryPath = Path.GetDirectoryName(databaseFilePath);
@@ -63,7 +80,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await pragmas.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var store = new SqliteExportStore(connection);
+        var store = new SqliteExportStore(connection, mediaDirPath);
         await store.MigrateAsync(cancellationToken);
 
         return store;
@@ -81,6 +98,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (2, Schema.V2),
         (3, Schema.V3),
         (4, Schema.V4),
+        (5, Schema.V5),
+        (6, Schema.V6),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -200,11 +219,251 @@ public sealed class SqliteExportStore : IAsyncDisposable
 
     private static object OrNull(int? value) => (object?)value ?? DBNull.Value;
 
+    private record PendingMedia(
+        string OwnerKind,
+        Snowflake OwnerId,
+        string AssetKind,
+        string SourceUrl,
+        string LocalPath,
+        string FilePath,
+        long SizeBytes,
+        string? ContentHash,
+        bool KeepHistory
+    );
+
+    private static string GetMediaRelativeFilePath(string assetKind, string url)
+    {
+        var fileName = ExportAssetDownloader.GetFileNameFromUrl(url);
+        var nameWithoutExtension = Path.GetFileNameWithoutExtension(fileName);
+        var hashStart = nameWithoutExtension.LastIndexOf('-') + 1;
+        var hash = hashStart > 0 ? nameWithoutExtension[hashStart..] : nameWithoutExtension;
+
+        if (hash.Length < 4)
+            hash = hash.PadRight(4, '0');
+
+        return Path.Combine(assetKind, hash[..2], hash[2..4], fileName);
+    }
+
+    private static bool IsDiscordMediaUrl(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+
+        return string.Equals(uri.Host, "cdn.discordapp.com", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(uri.Host, "media.discordapp.net", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async ValueTask<PendingMedia?> TryDownloadMediaAsync(
+        string ownerKind,
+        Snowflake ownerId,
+        string assetKind,
+        string? sourceUrl,
+        bool keepHistory,
+        CancellationToken cancellationToken
+    )
+    {
+        if (_mediaDownloader is null || _mediaDirPath is null || !IsDiscordMediaUrl(sourceUrl))
+            return null;
+
+        if (
+            ownerKind == "guild"
+            && assetKind == "guild-icons"
+            && sourceUrl!.Contains("/embed/avatars/", StringComparison.OrdinalIgnoreCase)
+        )
+            return null;
+
+        try
+        {
+            var relativeFilePath = GetMediaRelativeFilePath(assetKind, sourceUrl!);
+            var result = await _mediaDownloader.DownloadWithInfoAsync(
+                sourceUrl!,
+                sourceUrl!,
+                relativeFilePath,
+                MediaDedupeMaxBytes,
+                cancellationToken
+            );
+            if (result is null)
+                return null;
+
+            return new PendingMedia(
+                ownerKind,
+                ownerId,
+                assetKind,
+                sourceUrl!,
+                Path.GetRelativePath(_mediaDirPath, result.FilePath),
+                result.FilePath,
+                result.SizeBytes,
+                result.Sha256Hash,
+                keepHistory
+            );
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private async ValueTask<(long? BlobId, string LocalPath)> ResolveBlobAsync(
+        PendingMedia media,
+        CancellationToken cancellationToken
+    )
+    {
+        if (media.ContentHash is null || media.SizeBytes > MediaDedupeMaxBytes)
+            return (null, media.LocalPath);
+
+        await using (
+            var existing = CreateCommand(
+                """
+                SELECT id, local_path
+                FROM media_blob
+                WHERE content_hash = $contentHash AND size_bytes = $sizeBytes;
+                """
+            )
+        )
+        {
+            existing.Parameters.AddWithValue("$contentHash", media.ContentHash);
+            existing.Parameters.AddWithValue("$sizeBytes", media.SizeBytes);
+
+            await using var reader = await existing.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var existingPath = reader.GetString(1);
+                if (!string.Equals(existingPath, media.LocalPath, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        File.Delete(media.FilePath);
+                    }
+                    catch (IOException) { }
+                }
+
+                return (reader.GetInt64(0), existingPath);
+            }
+        }
+
+        await using var insert = CreateCommand(
+            """
+            INSERT INTO media_blob (content_hash, size_bytes, local_path, recorded_at)
+            VALUES ($contentHash, $sizeBytes, $localPath, $recordedAt)
+            RETURNING id;
+            """
+        );
+        insert.Parameters.AddWithValue("$contentHash", media.ContentHash);
+        insert.Parameters.AddWithValue("$sizeBytes", media.SizeBytes);
+        insert.Parameters.AddWithValue("$localPath", media.LocalPath);
+        insert.Parameters.AddWithValue(
+            "$recordedAt",
+            DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+        );
+
+        return ((long)(await insert.ExecuteScalarAsync(cancellationToken))!, media.LocalPath);
+    }
+
+    private async ValueTask InsertMediaAsync(
+        PendingMedia? media,
+        CancellationToken cancellationToken
+    )
+    {
+        if (media is null)
+            return;
+
+        var (blobId, localPath) = await ResolveBlobAsync(media, cancellationToken);
+
+        if (!media.KeepHistory)
+        {
+            await using var delete = CreateCommand(
+                """
+                DELETE FROM media_asset
+                WHERE owner_kind = $ownerKind AND owner_id = $ownerId AND asset_kind = $assetKind;
+                """
+            );
+            delete.Parameters.AddWithValue("$ownerKind", media.OwnerKind);
+            delete.Parameters.AddWithValue("$ownerId", ToDbId(media.OwnerId));
+            delete.Parameters.AddWithValue("$assetKind", media.AssetKind);
+            await delete.ExecuteNonQueryAsync(cancellationToken);
+        }
+        else
+        {
+            await using var existing = CreateCommand(
+                """
+                SELECT source_url
+                FROM media_asset
+                WHERE owner_kind = $ownerKind
+                    AND owner_id = $ownerId
+                    AND asset_kind = $assetKind
+                    AND is_current = 1;
+                """
+            );
+            existing.Parameters.AddWithValue("$ownerKind", media.OwnerKind);
+            existing.Parameters.AddWithValue("$ownerId", ToDbId(media.OwnerId));
+            existing.Parameters.AddWithValue("$assetKind", media.AssetKind);
+
+            if (
+                await existing.ExecuteScalarAsync(cancellationToken) is string currentUrl
+                && string.Equals(currentUrl, media.SourceUrl, StringComparison.Ordinal)
+            )
+                return;
+
+            await using var expire = CreateCommand(
+                """
+                UPDATE media_asset
+                SET is_current = 0
+                WHERE owner_kind = $ownerKind
+                    AND owner_id = $ownerId
+                    AND asset_kind = $assetKind
+                    AND is_current = 1;
+                """
+            );
+            expire.Parameters.AddWithValue("$ownerKind", media.OwnerKind);
+            expire.Parameters.AddWithValue("$ownerId", ToDbId(media.OwnerId));
+            expire.Parameters.AddWithValue("$assetKind", media.AssetKind);
+            await expire.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var insert = CreateCommand(
+            """
+            INSERT INTO media_asset (
+                owner_kind, owner_id, asset_kind, source_url, local_path, is_current, recorded_at, blob_id
+            ) VALUES (
+                $ownerKind, $ownerId, $assetKind, $sourceUrl, $localPath, 1, $recordedAt, $blobId
+            );
+            """
+        );
+        insert.Parameters.AddWithValue("$ownerKind", media.OwnerKind);
+        insert.Parameters.AddWithValue("$ownerId", ToDbId(media.OwnerId));
+        insert.Parameters.AddWithValue("$assetKind", media.AssetKind);
+        insert.Parameters.AddWithValue("$sourceUrl", media.SourceUrl);
+        insert.Parameters.AddWithValue("$localPath", localPath);
+        insert.Parameters.AddWithValue(
+            "$recordedAt",
+            DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+        );
+        insert.Parameters.AddWithValue("$blobId", (object?)blobId ?? DBNull.Value);
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async ValueTask UpsertGuildAsync(
         Guild guild,
         CancellationToken cancellationToken = default
     )
     {
+        var iconMedia = await TryDownloadMediaAsync(
+            "guild",
+            guild.Id,
+            "guild-icons",
+            guild.IconUrl,
+            keepHistory: true,
+            cancellationToken
+        );
+        var bannerMedia = await TryDownloadMediaAsync(
+            "guild",
+            guild.Id,
+            "guild-banners",
+            guild.BannerUrl,
+            keepHistory: true,
+            cancellationToken
+        );
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
@@ -212,17 +471,22 @@ public sealed class SqliteExportStore : IAsyncDisposable
 
             await using var command = CreateCommand(
                 """
-                INSERT INTO guild (id, name, icon_url)
-                VALUES ($id, $name, $iconUrl)
+                INSERT INTO guild (id, name, icon_url, banner_url)
+                VALUES ($id, $name, $iconUrl, $bannerUrl)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
-                    icon_url = excluded.icon_url;
+                    icon_url = excluded.icon_url,
+                    banner_url = excluded.banner_url;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(guild.Id));
             command.Parameters.AddWithValue("$name", guild.Name);
             command.Parameters.AddWithValue("$iconUrl", OrNull(guild.IconUrl));
+            command.Parameters.AddWithValue("$bannerUrl", OrNull(guild.BannerUrl));
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await InsertMediaAsync(iconMedia, cancellationToken);
+            await InsertMediaAsync(bannerMedia, cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
         }
@@ -513,6 +777,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
+        var avatarMedia = await TryDownloadMediaAsync(
+            "user",
+            userId,
+            "avatars",
+            dto.AvatarUrl,
+            keepHistory: false,
+            cancellationToken
+        );
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
@@ -564,6 +837,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$pending", dto.Pending ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
+            await InsertMediaAsync(avatarMedia, cancellationToken);
+
             await MaybeAutoFlushAsync(cancellationToken);
         }
         finally
@@ -578,11 +853,53 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
+        var attachmentMedia = new List<PendingMedia>();
+        foreach (var attachment in message.Attachments)
+        {
+            if (
+                await TryDownloadMediaAsync(
+                    "attachment",
+                    attachment.Id,
+                    "attachments",
+                    attachment.Url,
+                    keepHistory: false,
+                    cancellationToken
+                ) is
+                { } media
+            )
+            {
+                attachmentMedia.Add(media);
+            }
+        }
+
+        if (message.ForwardedMessage is { } forwarded)
+        {
+            foreach (var attachment in forwarded.Attachments)
+            {
+                if (
+                    await TryDownloadMediaAsync(
+                        "attachment",
+                        attachment.Id,
+                        "attachments",
+                        attachment.Url,
+                        keepHistory: false,
+                        cancellationToken
+                    ) is
+                    { } media
+                )
+                {
+                    attachmentMedia.Add(media);
+                }
+            }
+        }
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
             await EnsureTransactionAsync(cancellationToken);
             await UpsertMessageCoreAsync(channelId, message, cancellationToken);
+            foreach (var media in attachmentMedia)
+                await InsertMediaAsync(media, cancellationToken);
             await MaybeAutoFlushAsync(cancellationToken);
         }
         finally
@@ -869,6 +1186,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
+        var iconMedia = await TryDownloadMediaAsync(
+            "role",
+            role.Id,
+            "role-icons",
+            role.IconUrl,
+            keepHistory: true,
+            cancellationToken
+        );
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
@@ -915,6 +1241,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$managed", role.Managed ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
+            await InsertMediaAsync(iconMedia, cancellationToken);
+
             await MaybeAutoFlushAsync(cancellationToken);
         }
         finally
@@ -929,6 +1257,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
+        var imageMedia = await TryDownloadMediaAsync(
+            "guild_emoji",
+            emoji.Id,
+            "emojis",
+            emoji.ImageUrl,
+            keepHistory: true,
+            cancellationToken
+        );
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
@@ -961,6 +1298,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$isManaged", emoji.IsManaged ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
+            await InsertMediaAsync(imageMedia, cancellationToken);
+
             await MaybeAutoFlushAsync(cancellationToken);
         }
         finally
@@ -975,6 +1314,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     )
     {
+        var imageMedia = await TryDownloadMediaAsync(
+            "guild_sticker",
+            sticker.Id,
+            "stickers",
+            sticker.SourceUrl,
+            keepHistory: true,
+            cancellationToken
+        );
+
         await _lock.WaitAsync(cancellationToken);
         try
         {
@@ -1008,6 +1356,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$creatorId", ToDbId(sticker.CreatorId));
             command.Parameters.AddWithValue("$isAvailable", sticker.IsAvailable ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await InsertMediaAsync(imageMedia, cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
         }

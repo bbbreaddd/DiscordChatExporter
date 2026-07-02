@@ -73,6 +73,22 @@ public partial class PatchMessageCommand : DiscordCommandBase
     )]
     public bool ShouldFormatMarkdown { get; set; } = true;
 
+    [CommandOption(
+        "media",
+        Description = "Download Discord media referenced by the patched database message."
+    )]
+    public bool ShouldDownloadAssets { get; set; }
+
+    [CommandOption(
+        "media-dir",
+        Description = "Download media to this directory. If not specified, the media directory will be derived from the output path."
+    )]
+    public string? AssetsDirPath
+    {
+        get;
+        set => field = value is not null ? Path.GetFullPath(value) : null;
+    }
+
     public override async ValueTask ExecuteAsync(IConsole console)
     {
         await base.ExecuteAsync(console);
@@ -83,6 +99,9 @@ public partial class PatchMessageCommand : DiscordCommandBase
                 "Option --format only supports 'Json' or 'Db' for patch-message."
             );
         }
+
+        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
+            throw new CommandException("Option --media-dir cannot be used without --media.");
 
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
@@ -95,7 +114,7 @@ public partial class PatchMessageCommand : DiscordCommandBase
             guild,
             channel,
             OutputPath,
-            null,
+            AssetsDirPath,
             ExportFormat,
             After,
             Before,
@@ -103,7 +122,7 @@ public partial class PatchMessageCommand : DiscordCommandBase
             MessageFilter.Null,
             false,
             ShouldFormatMarkdown,
-            false,
+            ShouldDownloadAssets,
             false,
             null,
             false

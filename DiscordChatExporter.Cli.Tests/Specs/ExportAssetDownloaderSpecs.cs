@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using DiscordChatExporter.Core.Exporting;
@@ -99,6 +100,53 @@ public class ExportAssetDownloaderSpecs
                 .GetFiles(workingDir.Path, "*.tmp")
                 .Should()
                 .BeEmpty("the temp file used during download should always be renamed away");
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task I_can_hash_a_downloaded_asset_while_streaming_it()
+    {
+        // Arrange: a real local HTTP server, so this exercises the same streaming path as
+        // database media downloads.
+        var port = GetFreeTcpPort();
+        var prefix = $"http://127.0.0.1:{port}/";
+        var content = Encoding.UTF8.GetBytes("fake asset bytes");
+
+        using var listener = new HttpListener();
+        listener.Prefixes.Add(prefix);
+        listener.Start();
+
+        var serverTask = Task.Run(async () =>
+        {
+            var context = await listener.GetContextAsync();
+            context.Response.ContentLength64 = content.Length;
+            await context.Response.OutputStream.WriteAsync(content);
+            context.Response.OutputStream.Close();
+        });
+
+        using var workingDir = TempDirectory.Create();
+
+        try
+        {
+            var downloader = new ExportAssetDownloader(workingDir.Path, reuse: true);
+
+            // Act
+            var result = await downloader.DownloadWithInfoAsync(
+                $"{prefix}image.png",
+                $"{prefix}image.png",
+                "image.png",
+                hashMaxBytes: 50 * 1024 * 1024
+            );
+            await serverTask;
+
+            // Assert
+            result.Should().NotBeNull();
+            result!.SizeBytes.Should().Be(content.Length);
+            result.Sha256Hash.Should().Be(Convert.ToHexStringLower(SHA256.HashData(content)));
         }
         finally
         {

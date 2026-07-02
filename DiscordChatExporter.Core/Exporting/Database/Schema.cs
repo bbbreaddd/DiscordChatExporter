@@ -225,4 +225,37 @@ internal static class Schema
             VALUES (OLD.id, OLD.name, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
         END;
         """;
+
+    public const string V5 = """
+        ALTER TABLE guild ADD COLUMN banner_url TEXT;
+
+        CREATE TABLE IF NOT EXISTS media_asset (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_kind TEXT NOT NULL,
+            owner_id INTEGER NOT NULL,
+            asset_kind TEXT NOT NULL,
+            source_url TEXT NOT NULL,
+            local_path TEXT NOT NULL,
+            is_current INTEGER NOT NULL DEFAULT 1,
+            recorded_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS media_asset_owner ON media_asset(owner_kind, owner_id, asset_kind);
+        CREATE UNIQUE INDEX IF NOT EXISTS media_asset_current ON media_asset(owner_kind, owner_id, asset_kind)
+            WHERE is_current = 1;
+        """;
+
+    public const string V6 = """
+        CREATE TABLE IF NOT EXISTS media_blob (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_hash TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            local_path TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            UNIQUE(content_hash, size_bytes)
+        );
+
+        ALTER TABLE media_asset ADD COLUMN blob_id INTEGER REFERENCES media_blob(id);
+        CREATE INDEX IF NOT EXISTS media_asset_blob ON media_asset(blob_id);
+        """;
 }

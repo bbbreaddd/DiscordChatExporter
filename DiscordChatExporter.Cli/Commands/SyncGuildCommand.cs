@@ -42,12 +42,28 @@ public partial class SyncGuildCommand : DiscordCommandBase
     )]
     public ExportFormat ExportFormat { get; set; } = ExportFormat.Db;
 
+    [CommandOption("media", Description = "Download Discord guild/catalog media while syncing.")]
+    public bool ShouldDownloadAssets { get; set; }
+
+    [CommandOption(
+        "media-dir",
+        Description = "Download media to this directory. If not specified, the media directory will be derived from the output path."
+    )]
+    public string? AssetsDirPath
+    {
+        get;
+        set => field = value is not null ? Path.GetFullPath(value) : null;
+    }
+
     public override async ValueTask ExecuteAsync(IConsole console)
     {
         await base.ExecuteAsync(console);
 
         if (ExportFormat != ExportFormat.Db)
             throw new CommandException("Option --format only supports 'Db' for syncguild.");
+
+        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
+            throw new CommandException("Option --media-dir cannot be used without --media.");
 
         if (!File.Exists(OutputPath))
         {
@@ -62,7 +78,11 @@ public partial class SyncGuildCommand : DiscordCommandBase
 
         var guild = await Discord.GetGuildAsync(GuildId, cancellationToken);
 
-        await using var store = await SqliteExportStore.OpenAsync(OutputPath, cancellationToken);
+        await using var store = await SqliteExportStore.OpenAsync(
+            OutputPath,
+            ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+            cancellationToken
+        );
 
         var (roleCount, emojiCount, stickerCount, scheduledEventCount) = await SyncGuildAsync(
             Discord,

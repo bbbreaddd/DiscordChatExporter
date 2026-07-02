@@ -244,11 +244,10 @@ public abstract class ExportCommandBase : DiscordCommandBase
                 );
             }
 
-            if (ShouldDownloadAssets || ShouldCacheAssetsOnly)
+            if (ShouldCacheAssetsOnly)
             {
                 throw new CommandException(
-                    "Options --media and --cache-media have no effect with the 'db' format "
-                        + "and cannot be used with it."
+                    "Option --cache-media has no effect with the 'db' format and cannot be used with it."
                 );
             }
 
@@ -426,7 +425,11 @@ public abstract class ExportCommandBase : DiscordCommandBase
         // up front and flushed/closed once the whole run finishes (successfully or not).
         var databaseStore =
             ExportFormat == ExportFormat.Db
-                ? await SqliteExportStore.OpenAsync(OutputPath, cancellationToken)
+                ? await SqliteExportStore.OpenAsync(
+                    OutputPath,
+                    ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+                    cancellationToken
+                )
                 : null;
 
         try
