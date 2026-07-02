@@ -204,4 +204,25 @@ internal static class Schema
         ALTER TABLE channel ADD COLUMN last_export_after INTEGER;
         ALTER TABLE channel ADD COLUMN last_export_before INTEGER;
         """;
+
+    // Same pattern as message_edit_history/message_pin_event in V2: a trigger on the existing
+    // upsert path is the entire implementation, so no C# write-path changes are needed. Every
+    // CHANNEL_UPDATE/THREAD_UPDATE (and catch-up/scan-missing re-export) already runs the
+    // channel upsert that sets the `name` column unconditionally, so a rename is just a row
+    // where OLD.name != NEW.name.
+    public const string V4 = """
+        CREATE TABLE IF NOT EXISTS channel_name_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS channel_name_history_channel ON channel_name_history(channel_id);
+
+        CREATE TRIGGER IF NOT EXISTS channel_name_history_ai AFTER UPDATE OF name ON channel
+            WHEN OLD.name != NEW.name BEGIN
+            INSERT INTO channel_name_history (channel_id, name, recorded_at)
+            VALUES (OLD.id, OLD.name, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+        """;
 }

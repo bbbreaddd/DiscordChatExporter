@@ -80,6 +80,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (1, Schema.V1),
         (2, Schema.V2),
         (3, Schema.V3),
+        (4, Schema.V4),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
