@@ -12,6 +12,10 @@ public record Role(
     string Name,
     int Position,
     Color? Color,
+    // Gradient/"holographic" role styling (Discord's "colors" object). Null for a plain
+    // solid-colored role -- only the legacy top-level Color is set in that case.
+    Color? SecondaryColor,
+    Color? TertiaryColor,
     ulong Permissions,
     bool Hoist,
     bool Mentionable,
@@ -27,6 +31,22 @@ public record Role(
         var position = json.GetProperty("position").GetInt32();
 
         var color = json.GetPropertyOrNull("color")
+            ?.GetInt32OrNull()
+            ?.Pipe(System.Drawing.Color.FromArgb)
+            .WithFullAlpha()
+            .NullIf(c => c.ToRgb() <= 0);
+
+        var colorsJson = json.GetPropertyOrNull("colors");
+
+        var secondaryColor = colorsJson
+            ?.GetPropertyOrNull("secondary_color")
+            ?.GetInt32OrNull()
+            ?.Pipe(System.Drawing.Color.FromArgb)
+            .WithFullAlpha()
+            .NullIf(c => c.ToRgb() <= 0);
+
+        var tertiaryColor = colorsJson
+            ?.GetPropertyOrNull("tertiary_color")
             ?.GetInt32OrNull()
             ?.Pipe(System.Drawing.Color.FromArgb)
             .WithFullAlpha()
@@ -50,6 +70,8 @@ public record Role(
             name,
             position,
             color,
+            secondaryColor,
+            tertiaryColor,
             permissions,
             hoist,
             mentionable,

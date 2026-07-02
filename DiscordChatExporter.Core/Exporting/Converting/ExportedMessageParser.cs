@@ -62,7 +62,7 @@ internal static class ExportedMessageParser
             ?.Pipe(ColorTranslator.FromHtml);
 
         // Not present in the export schema
-        return new Role(id, name, position, color, 0, false, false, null, null, false);
+        return new Role(id, name, position, color, null, null, 0, false, false, null, null, false);
     }
 
     public static Emoji ParseEmoji(JsonElement json)

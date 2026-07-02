@@ -308,4 +308,11 @@ internal static class Schema
             attempts INTEGER NOT NULL DEFAULT 1
         );
         """;
+
+    // Discord role gradient/"holographic" colors (the role's "colors" object). The pre-existing
+    // "color" column is unaffected and keeps holding the primary color for solid-colored roles.
+    public const string V11 = """
+        ALTER TABLE role ADD COLUMN secondary_color TEXT;
+        ALTER TABLE role ADD COLUMN tertiary_color TEXT;
+        """;
 }

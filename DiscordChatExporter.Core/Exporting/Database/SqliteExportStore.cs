@@ -120,6 +120,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (8, Schema.V8),
         (9, Schema.V9),
         (10, Schema.V10),
+        (11, Schema.V11),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -1398,16 +1399,18 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await using var command = CreateCommand(
                 """
                 INSERT INTO role (
-                    id, guild_id, name, color, position, permissions, hoist, mentionable,
-                    icon_url, unicode_emoji, managed
+                    id, guild_id, name, color, secondary_color, tertiary_color, position,
+                    permissions, hoist, mentionable, icon_url, unicode_emoji, managed
                 ) VALUES (
-                    $id, $guildId, $name, $color, $position, $permissions, $hoist, $mentionable,
-                    $iconUrl, $unicodeEmoji, $managed
+                    $id, $guildId, $name, $color, $secondaryColor, $tertiaryColor, $position,
+                    $permissions, $hoist, $mentionable, $iconUrl, $unicodeEmoji, $managed
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     guild_id = excluded.guild_id,
                     name = excluded.name,
                     color = excluded.color,
+                    secondary_color = excluded.secondary_color,
+                    tertiary_color = excluded.tertiary_color,
                     position = excluded.position,
                     permissions = excluded.permissions,
                     hoist = excluded.hoist,
@@ -1423,6 +1426,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue(
                 "$color",
                 OrNull(role.Color is { } c ? $"#{c.R:X2}{c.G:X2}{c.B:X2}" : null)
+            );
+            command.Parameters.AddWithValue(
+                "$secondaryColor",
+                OrNull(role.SecondaryColor is { } sc ? $"#{sc.R:X2}{sc.G:X2}{sc.B:X2}" : null)
+            );
+            command.Parameters.AddWithValue(
+                "$tertiaryColor",
+                OrNull(role.TertiaryColor is { } tc ? $"#{tc.R:X2}{tc.G:X2}{tc.B:X2}" : null)
             );
             command.Parameters.AddWithValue("$position", role.Position);
             command.Parameters.AddWithValue(
