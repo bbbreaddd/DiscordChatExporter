@@ -55,6 +55,13 @@ public partial class SyncGuildCommand : DiscordCommandBase
         set => field = value is not null ? Path.GetFullPath(value) : null;
     }
 
+    [CommandOption(
+        "retry-failed",
+        Description = "Retry media URLs previously recorded as permanently gone (404/410), "
+            + "instead of skipping them. By default such URLs are only attempted once."
+    )]
+    public bool RetryFailedMedia { get; set; }
+
     public override async ValueTask ExecuteAsync(IConsole console)
     {
         await base.ExecuteAsync(console);
@@ -81,6 +88,7 @@ public partial class SyncGuildCommand : DiscordCommandBase
         await using var store = await SqliteExportStore.OpenAsync(
             OutputPath,
             ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+            RetryFailedMedia,
             cancellationToken
         );
 

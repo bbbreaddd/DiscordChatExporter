@@ -68,6 +68,13 @@ public partial class WatchGuildCommand : DiscordCommandBase
     )]
     public bool ScanMissing { get; set; }
 
+    [CommandOption(
+        "retry-failed",
+        Description = "Retry media URLs previously recorded as permanently gone (404/410), "
+            + "instead of skipping them. By default such URLs are only attempted once."
+    )]
+    public bool RetryFailedMedia { get; set; }
+
     private readonly Dictionary<Snowflake, HashSet<Snowflake>> _knownPinnedIds = new();
 
     // Guards against re-running a full guild rescan on every gateway READY. A flapping
@@ -132,6 +139,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
         await using var store = await SqliteExportStore.OpenAsync(
             OutputPath,
             ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+            RetryFailedMedia,
             cancellationToken
         );
 

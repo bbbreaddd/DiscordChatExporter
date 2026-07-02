@@ -231,7 +231,10 @@ internal partial class ExportAssetDownloader(
 
 internal partial class ExportAssetDownloader
 {
-    private static string NormalizeUrl(string url)
+    // Internal so that the SQLite export store can key its dead-link ledger on the same
+    // normalized form used for the cache filename hash -- otherwise a re-signed CDN URL would
+    // never match a previously-ledgered entry, defeating the ledger's purpose.
+    internal static string NormalizeUrl(string url)
     {
         // Remove signature parameters from Discord CDN URLs to normalize them. Both hosts below
         // sign URLs with the same ex/is/hm query params (media.discordapp.net is what embed

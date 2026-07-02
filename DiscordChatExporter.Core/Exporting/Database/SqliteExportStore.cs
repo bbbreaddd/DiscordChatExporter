@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -28,6 +29,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private readonly SqliteConnection _connection;
     private readonly string? _mediaDirPath;
     private readonly ExportAssetDownloader? _mediaDownloader;
+    private readonly bool _retryFailedMedia;
 
     // All public members serialize through this so the single underlying connection (and its
     // at-most-one open transaction) is never touched from two threads at once -- callers may
@@ -37,10 +39,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private SqliteTransaction? _transaction;
     private int _pendingCount;
 
-    private SqliteExportStore(SqliteConnection connection, string? mediaDirPath)
+    private SqliteExportStore(
+        SqliteConnection connection,
+        string? mediaDirPath,
+        bool retryFailedMedia
+    )
     {
         _connection = connection;
         _mediaDirPath = mediaDirPath;
+        _retryFailedMedia = retryFailedMedia;
         _mediaDownloader = mediaDirPath is not null
             ? new ExportAssetDownloader(mediaDirPath, reuse: true)
             : null;
@@ -49,11 +56,20 @@ public sealed class SqliteExportStore : IAsyncDisposable
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         CancellationToken cancellationToken = default
-    ) => await OpenAsync(databaseFilePath, null, cancellationToken);
+    ) => await OpenAsync(databaseFilePath, null, false, cancellationToken);
 
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         string? mediaDirPath,
+        CancellationToken cancellationToken
+    ) => await OpenAsync(databaseFilePath, mediaDirPath, false, cancellationToken);
+
+    // retryFailedMedia forces re-attempting media URLs already recorded in the
+    // media_download_failure ledger (see Schema.V10), instead of skipping them.
+    public static async Task<SqliteExportStore> OpenAsync(
+        string databaseFilePath,
+        string? mediaDirPath,
+        bool retryFailedMedia,
         CancellationToken cancellationToken
     )
     {
@@ -80,7 +96,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await pragmas.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var store = new SqliteExportStore(connection, mediaDirPath);
+        var store = new SqliteExportStore(connection, mediaDirPath, retryFailedMedia);
         await store.MigrateAsync(cancellationToken);
 
         return store;
@@ -103,6 +119,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (7, Schema.V7),
         (8, Schema.V8),
         (9, Schema.V9),
+        (10, Schema.V10),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -275,6 +292,16 @@ public sealed class SqliteExportStore : IAsyncDisposable
         )
             return null;
 
+        var normalizedUrl = ExportAssetDownloader.NormalizeUrl(sourceUrl!);
+
+        // Skip the network entirely for a URL already known to be permanently gone, unless the
+        // caller explicitly asked to retry (--retry-failed). A file already reused from a local
+        // cache (e.g. hardlinked in from a pre-migration media dir) never reaches this check --
+        // DownloadWithInfoAsync's own file-existence check below short-circuits first -- so this
+        // can't wrongly block a legitimately-cached asset.
+        if (!_retryFailedMedia && await IsMediaLedgeredAsync(normalizedUrl, cancellationToken))
+            return null;
+
         try
         {
             var relativeFilePath = GetMediaRelativeFilePath(assetKind, sourceUrl!);
@@ -300,9 +327,78 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 keepHistory
             );
         }
+        // Only a permanent "gone" response is ledgered. Timeouts, 5xx, and other network errors
+        // are left unledgered so they're retried on the next run -- see Schema.V10.
+        catch (HttpRequestException ex)
+            when (ex.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+        {
+            await RecordMediaFailureAsync(
+                normalizedUrl,
+                (int)ex.StatusCode.Value,
+                cancellationToken
+            );
+            return null;
+        }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
         {
             return null;
+        }
+    }
+
+    // Internal (rather than private) so tests can exercise the ledger directly without needing
+    // to trigger a real network failure -- same rationale as GetFileNameFromUrl in
+    // ExportAssetDownloader.
+    internal async ValueTask<bool> IsMediaLedgeredAsync(
+        string urlNormalized,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                "SELECT 1 FROM media_download_failure WHERE url_normalized = $url;"
+            );
+            command.Parameters.AddWithValue("$url", urlNormalized);
+            return await command.ExecuteScalarAsync(cancellationToken) is not null;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    internal async ValueTask RecordMediaFailureAsync(
+        string urlNormalized,
+        int statusCode,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO media_download_failure (
+                    url_normalized, status_code, first_failed_at, last_attempt_at, attempts
+                )
+                VALUES ($url, $statusCode, $now, $now, 1)
+                ON CONFLICT(url_normalized) DO UPDATE SET
+                    status_code = excluded.status_code,
+                    last_attempt_at = excluded.last_attempt_at,
+                    attempts = attempts + 1;
+                """
+            );
+            command.Parameters.AddWithValue("$url", urlNormalized);
+            command.Parameters.AddWithValue("$statusCode", statusCode);
+            command.Parameters.AddWithValue("$now", now);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
         }
     }
 

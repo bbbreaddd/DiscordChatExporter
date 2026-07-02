@@ -134,6 +134,23 @@ public abstract class ExportCommandBase : DiscordCommandBase
     }
 
     [CommandOption(
+        "retry-failed",
+        Description = "Only applies to '-f Db'. Retry media URLs previously recorded as "
+            + "permanently gone (404/410), instead of skipping them."
+    )]
+    public bool RetryFailedMedia { get; set; }
+
+    [CommandOption(
+        "force-full-scan",
+        Description = "Only applies to '-f Db'. Re-fetches every message in every selected "
+            + "channel from the beginning, ignoring the stored cursor and the "
+            + "nothing-changed skip check. Existing rows are upserted in place (safe, no "
+            + "duplicates) -- meant for backfilling columns added by a newer schema into "
+            + "messages that were already captured under an older one."
+    )]
+    public bool ForceFullScan { get; set; }
+
+    [CommandOption(
         "dateformat",
         Description = "This option doesn't do anything. Kept for backwards compatibility."
     )]
@@ -222,6 +239,13 @@ public abstract class ExportCommandBase : DiscordCommandBase
             throw new CommandException(
                 "Option --incremental can only be used with JSON format. "
                     + "Use the convert command to get other formats."
+            );
+        }
+
+        if (ForceFullScan && ExportFormat != ExportFormat.Db)
+        {
+            throw new CommandException(
+                "Option --force-full-scan can only be used with 'Db' format."
             );
         }
 
@@ -428,6 +452,7 @@ public abstract class ExportCommandBase : DiscordCommandBase
                 ? await SqliteExportStore.OpenAsync(
                     OutputPath,
                     ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
+                    RetryFailedMedia,
                     cancellationToken
                 )
                 : null;
@@ -545,7 +570,8 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                             IsIncremental,
                                             ShouldCacheAssetsOnly,
                                             shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
-                                            isCompact: IsCompact
+                                            isCompact: IsCompact,
+                                            forceFullScan: ForceFullScan
                                         );
 
                                         if (databaseStore is not null)
@@ -677,6 +703,13 @@ public abstract class ExportCommandBase : DiscordCommandBase
             throw new CommandException(
                 "Option --incremental can only be used with JSON format. "
                     + "Use the convert command to get other formats."
+            );
+        }
+
+        if (ForceFullScan && ExportFormat != ExportFormat.Db)
+        {
+            throw new CommandException(
+                "Option --force-full-scan can only be used with 'Db' format."
             );
         }
 

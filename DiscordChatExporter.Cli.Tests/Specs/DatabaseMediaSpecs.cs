@@ -325,6 +325,72 @@ public class DatabaseMediaSpecs
     }
 
     [Fact]
+    public async Task Db_skips_a_media_url_previously_ledgered_as_permanently_gone()
+    {
+        using var db = TempFile.Create();
+        using var mediaDir = TempDirectory.Create();
+
+        // This URL is never cached and points at a real Discord CDN host that this test never
+        // actually reaches -- if the ledger gate below did not short-circuit before the network
+        // call, this test would hang for minutes retrying a connection failure instead of failing
+        // fast, since HTTP connection failures are treated as retryable by Http.ResiliencePipeline.
+        var attachmentUrl = "https://cdn.discordapp.com/attachments/1/20/image.png?ex=1&is=2&hm=3";
+
+        await using var store = await SqliteExportStore.OpenAsync(db.Path, mediaDir.Path, default);
+        await store.RecordMediaFailureAsync(ExportAssetDownloader.NormalizeUrl(attachmentUrl), 404);
+
+        await SeedMessageParentsAsync(store);
+        await store.UpsertMessageAsync(new Snowflake(300), ParseMessage(attachmentUrl));
+        await store.FlushAsync();
+
+        (await ExecuteScalarLongAsync(db.Path, "SELECT COUNT(*) FROM media_asset;")).Should().Be(0);
+        (await ExecuteScalarLongAsync(db.Path, "SELECT COUNT(*) FROM media_download_failure;"))
+            .Should()
+            .Be(1);
+    }
+
+    [Fact]
+    public async Task Db_media_ledger_matches_urls_by_normalized_form_and_tracks_attempt_count()
+    {
+        using var db = TempFile.Create();
+        using var mediaDir = TempDirectory.Create();
+
+        var firstSignature = "https://cdn.discordapp.com/attachments/1/20/image.png?ex=1&is=2&hm=3";
+        var reSignedSameAsset =
+            "https://cdn.discordapp.com/attachments/1/20/image.png?ex=9&is=8&hm=7";
+
+        await using var store = await SqliteExportStore.OpenAsync(db.Path, mediaDir.Path, default);
+
+        (await store.IsMediaLedgeredAsync(ExportAssetDownloader.NormalizeUrl(firstSignature)))
+            .Should()
+            .BeFalse();
+
+        await store.RecordMediaFailureAsync(
+            ExportAssetDownloader.NormalizeUrl(firstSignature),
+            404
+        );
+
+        // A freshly re-signed link for the same asset must still match the ledgered entry --
+        // otherwise every gateway reconnect would re-attempt (and re-fail) the same dead link.
+        (await store.IsMediaLedgeredAsync(ExportAssetDownloader.NormalizeUrl(reSignedSameAsset)))
+            .Should()
+            .BeTrue();
+
+        await store.RecordMediaFailureAsync(
+            ExportAssetDownloader.NormalizeUrl(reSignedSameAsset),
+            410
+        );
+        await store.FlushAsync();
+
+        (await ExecuteScalarLongAsync(db.Path, "SELECT attempts FROM media_download_failure;"))
+            .Should()
+            .Be(2);
+        (await ExecuteScalarLongAsync(db.Path, "SELECT status_code FROM media_download_failure;"))
+            .Should()
+            .Be(410);
+    }
+
+    [Fact]
     public async Task Db_preserves_raw_component_payloads()
     {
         using var db = TempFile.Create();

@@ -291,4 +291,21 @@ internal static class Schema
             PRIMARY KEY (guild_id, snapshot_date)
         );
         """;
+
+    // Records media URLs that returned a permanent "gone" response (404/410) so that a later
+    // run (e.g. watchguild --catch-up, which re-enqueues every channel on each gateway READY)
+    // doesn't waste a request re-attempting a link that will never come back. Keyed on the
+    // *normalized* URL (signature params stripped) so a freshly re-signed CDN link for the same
+    // asset still matches. Deliberately does NOT ledger timeouts/5xx/network errors -- those are
+    // transient and must be retried, since permanently marking a live link dead during an outage
+    // would be silent data loss.
+    public const string V10 = """
+        CREATE TABLE IF NOT EXISTS media_download_failure (
+            url_normalized TEXT PRIMARY KEY,
+            status_code INTEGER,
+            first_failed_at TEXT NOT NULL,
+            last_attempt_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 1
+        );
+        """;
 }
