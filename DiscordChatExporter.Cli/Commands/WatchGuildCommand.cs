@@ -331,6 +331,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             {
                                 var message = Message.Parse(data);
                                 queue.EnqueueMessageUpsert(channelId, message);
+
+                                lock (console)
+                                    console.Output.WriteLine(
+                                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [message] channel={channelId} author={message.Author.FullName}: {DescribeMessageContent(message)}"
+                                    );
                             }
                             catch (Exception ex)
                             {
@@ -631,6 +636,47 @@ public partial class WatchGuildCommand : DiscordCommandBase
             await gatewayTask;
         }
         catch (OperationCanceledException) { }
+    }
+
+    // Renders a single-line, log-friendly preview of a message for the live [message] feed --
+    // truncated and stripped of newlines so one incoming message is always one log line.
+    private static string DescribeMessageContent(Message message)
+    {
+        const int maxLength = 200;
+
+        // A "Forward" carries no content/attachments/embeds/stickers of its own -- the actual
+        // forwarded text lives in the nested snapshot instead, so fall back to that.
+        var content = message.Content;
+        if (string.IsNullOrWhiteSpace(content))
+            content = message.ForwardedMessage?.Content ?? "";
+
+        content = content.Replace('\n', ' ').Replace('\r', ' ').Trim();
+        if (content.Length > maxLength)
+            content = content[..maxLength] + "…";
+
+        if (!string.IsNullOrWhiteSpace(content))
+            return message.IsForwarded ? $"[forwarded] {content}" : content;
+
+        var attachmentCount =
+            message.Attachments.Count + (message.ForwardedMessage?.Attachments.Count ?? 0);
+        var embedCount = message.Embeds.Count + (message.ForwardedMessage?.Embeds.Count ?? 0);
+        var stickerCount = message.Stickers.Count + (message.ForwardedMessage?.Stickers.Count ?? 0);
+
+        var parts = new List<string>();
+        if (attachmentCount > 0)
+            parts.Add($"{attachmentCount} attachment(s)");
+        if (embedCount > 0)
+            parts.Add($"{embedCount} embed(s)");
+        if (stickerCount > 0)
+            parts.Add($"{stickerCount} sticker(s)");
+        if (message.Poll is not null)
+            parts.Add("poll");
+        if (message.Components.Count > 0)
+            parts.Add("components");
+        if (message.IsForwarded)
+            parts.Add("forwarded");
+
+        return parts.Count > 0 ? $"[{string.Join(", ", parts)}]" : "[empty]";
     }
 
     // Ensures the channel row (and its guild) exist before a message's foreign key needs them.

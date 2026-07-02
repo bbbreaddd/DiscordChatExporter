@@ -260,7 +260,13 @@ public class GatewayClient
                             writer.WriteNumber("op", 2);
                             writer.WriteStartObject("d");
                             writer.WriteString("token", _token);
-                            writer.WriteNumber("intents", 67081); // 1 | 8 | 512 | 1024 | 65536
+                            // 1 (GUILDS) | 8 (GUILD_EMOJIS_AND_STICKERS) | 512 (GUILD_MESSAGES)
+                            // | 1024 (GUILD_MESSAGE_REACTIONS) | 32768 (MESSAGE_CONTENT, privileged)
+                            // | 65536 (GUILD_SCHEDULED_EVENTS). Without MESSAGE_CONTENT, Discord
+                            // strips content/embeds/attachments/components/poll from every
+                            // message that isn't a DM, doesn't mention the bot, or wasn't sent by
+                            // the bot itself.
+                            writer.WriteNumber("intents", 99849);
                             writer.WriteStartObject("properties");
                             writer.WriteString("os", "linux");
                             writer.WriteString("browser", "discord-live-watcher-db");
