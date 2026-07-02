@@ -419,6 +419,17 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     case "MESSAGE_REACTION_REMOVE":
                     case "MESSAGE_REACTION_REMOVE_ALL":
                     case "MESSAGE_REACTION_REMOVE_EMOJI":
+                        {
+                            var channelId = Snowflake.Parse(
+                                data.GetProperty("channel_id").GetString()!
+                            );
+                            var messageId = Snowflake.Parse(
+                                data.GetProperty("message_id").GetString()!
+                            );
+                            queue.EnqueuePatch(channelId, messageId, eventType);
+                        }
+                        break;
+
                     case "MESSAGE_POLL_VOTE_ADD":
                     case "MESSAGE_POLL_VOTE_REMOVE":
                         {
@@ -428,7 +439,16 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             var messageId = Snowflake.Parse(
                                 data.GetProperty("message_id").GetString()!
                             );
-                            queue.EnqueuePatch(channelId, messageId, eventType);
+                            var answerId = data.GetProperty("answer_id").GetInt32();
+                            var userId = Snowflake.Parse(data.GetProperty("user_id").GetString()!);
+                            queue.EnqueuePollVote(
+                                channelId,
+                                messageId,
+                                answerId,
+                                userId,
+                                eventType == "MESSAGE_POLL_VOTE_ADD",
+                                eventType
+                            );
                         }
                         break;
 
@@ -584,6 +604,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     console.Output.WriteLine(
                         $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [status] queue status: "
                             + $"messages={queue.PendingMessagesCount}, channels={queue.PendingChannelsCount}, patches={queue.PendingPatchesCount}, "
+                            + $"pollVotes={queue.PendingPollVotesCount}, "
                             + $"deleteChannels={queue.PendingDeleteChannelsCount}, deleteMessages={queue.PendingDeleteMessagesCount}, "
                             + $"guildSync={(queue.IsGuildSyncPending ? "pending" : "idle")}"
                     );
@@ -765,6 +786,25 @@ public partial class WatchGuildCommand : DiscordCommandBase
         CancellationToken cancellationToken
     )
     {
+        async ValueTask<MessagePatchResult> PatchMessageAsync(
+            Snowflake channelId,
+            Snowflake messageId
+        )
+        {
+            var req = await CreateExportRequestAsync(
+                channelId,
+                forceFullScan: false,
+                cancellationToken
+            );
+            return await DatabaseMessagePatcher.PatchMessageAsync(
+                req,
+                Discord,
+                store,
+                messageId,
+                cancellationToken
+            );
+        }
+
         if (item is UpsertMessageItem upsert)
         {
             // Hot path: write the already-materialized gateway message straight to the database.
@@ -786,21 +826,33 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Patching message {patch.MessageId} in channel {patch.ChannelId} ({patch.Reason})..."
                 );
-            var req = await CreateExportRequestAsync(
-                patch.ChannelId,
-                forceFullScan: false,
-                cancellationToken
-            );
-            var result = await DatabaseMessagePatcher.PatchMessageAsync(
-                req,
-                Discord,
-                store,
-                patch.MessageId,
-                cancellationToken
-            );
+            var result = await PatchMessageAsync(patch.ChannelId, patch.MessageId);
             lock (console)
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Patch result: {result.Reason}"
+                );
+        }
+        else if (item is PollVoteItem vote)
+        {
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Recording poll vote message={vote.MessageId} answer={vote.AnswerId} user={vote.UserId} ({vote.Reason})..."
+                );
+
+            await store.InsertPollVoteEventAsync(
+                vote.ChannelId,
+                vote.MessageId,
+                vote.AnswerId,
+                vote.UserId,
+                vote.IsAdded,
+                cancellationToken
+            );
+            await store.FlushAsync(cancellationToken);
+
+            var result = await PatchMessageAsync(vote.ChannelId, vote.MessageId);
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Poll vote recorded; patch result: {result.Reason}"
                 );
         }
         else if (item is MarkDeletedItem delete)

@@ -205,6 +205,28 @@ public class WatchGuildSpecs
     }
 
     [Fact]
+    public void Poll_vote_events_are_selected_before_debounced_patches()
+    {
+        var queue = new WatchGuildQueue(
+            channelDebounce: TimeSpan.FromMilliseconds(50),
+            patchDebounce: TimeSpan.FromMilliseconds(50),
+            deleteDebounce: TimeSpan.FromMilliseconds(50)
+        );
+
+        queue.EnqueuePatch(new Snowflake(123), new Snowflake(456), "MESSAGE_UPDATE");
+        queue.EnqueuePollVote(
+            new Snowflake(123),
+            new Snowflake(456),
+            3,
+            new Snowflake(789),
+            true,
+            "MESSAGE_POLL_VOTE_ADD"
+        );
+
+        queue.TryDequeue().Should().BeOfType<PollVoteItem>();
+    }
+
+    [Fact]
     public void Live_message_upsert_retries_then_gives_up()
     {
         var queue = new WatchGuildQueue();

@@ -493,7 +493,10 @@ public class DiscordClient
         if (guildId == Guild.DirectMessages.Id)
             return Guild.DirectMessages;
 
-        var response = await GetJsonResponseAsync($"guilds/{guildId}", cancellationToken);
+        var response = await GetJsonResponseAsync(
+            $"guilds/{guildId}?with_counts=true",
+            cancellationToken
+        );
         return Guild.Parse(response);
     }
 

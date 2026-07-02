@@ -15,6 +15,15 @@ public record UpsertMessageItem(Snowflake ChannelId, Message Message, int Attemp
 
 public record PatchMessageItem(Snowflake ChannelId, Snowflake MessageId, string Reason) : QueueItem;
 
+public record PollVoteItem(
+    Snowflake ChannelId,
+    Snowflake MessageId,
+    int AnswerId,
+    Snowflake UserId,
+    bool IsAdded,
+    string Reason
+) : QueueItem;
+
 public record MarkDeletedItem(Snowflake ChannelId, IReadOnlyList<Snowflake> MessageIds) : QueueItem;
 
 public record SyncGuildItem(string Reason) : QueueItem;
@@ -41,6 +50,7 @@ public class WatchGuildQueue
     // cheap (a local upsert, no Discord call) and are the latency-critical path (a new message
     // should land in the database within a poll tick, not after a debounce window).
     private readonly Queue<UpsertMessageItem> _pendingMessages = new();
+    private readonly Queue<PollVoteItem> _pendingPollVotes = new();
 
     private readonly Dictionary<Snowflake, PendingExport> _pendingExports = new();
     private readonly Dictionary<string, PendingPatch> _pendingPatches = new();
@@ -96,6 +106,15 @@ public class WatchGuildQueue
         {
             lock (_lock)
                 return _pendingPatches.Count;
+        }
+    }
+
+    public int PendingPollVotesCount
+    {
+        get
+        {
+            lock (_lock)
+                return _pendingPollVotes.Count;
         }
     }
 
@@ -219,6 +238,23 @@ public class WatchGuildQueue
         }
     }
 
+    public void EnqueuePollVote(
+        Snowflake channelId,
+        Snowflake messageId,
+        int answerId,
+        Snowflake userId,
+        bool isAdded,
+        string reason
+    )
+    {
+        lock (_lock)
+        {
+            _pendingPollVotes.Enqueue(
+                new PollVoteItem(channelId, messageId, answerId, userId, isAdded, reason)
+            );
+        }
+    }
+
     public void EnqueueDelete(Snowflake channelId, Snowflake messageId)
     {
         EnqueueDelete(channelId, new[] { messageId });
@@ -269,6 +305,9 @@ public class WatchGuildQueue
             // latency-critical path and each one is a fast local upsert.
             if (_pendingMessages.Count > 0)
                 return _pendingMessages.Dequeue();
+
+            if (_pendingPollVotes.Count > 0)
+                return _pendingPollVotes.Dequeue();
 
             var duePatch = _pendingPatches
                 .Where(p => p.Value.Due <= now)

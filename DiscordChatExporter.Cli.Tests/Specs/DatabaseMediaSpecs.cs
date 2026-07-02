@@ -79,6 +79,38 @@ public class DatabaseMediaSpecs
                 .RootElement
         );
 
+    private static Message ParseComponentMessage() =>
+        Message.Parse(
+            JsonDocument
+                .Parse(
+                    """
+                    {
+                      "id": "11",
+                      "type": 0,
+                      "content": "",
+                      "channel_id": "300",
+                      "author": {
+                        "id": "1",
+                        "username": "alice",
+                        "discriminator": "0000",
+                        "avatar": null
+                      },
+                      "attachments": [],
+                      "embeds": [],
+                      "pinned": false,
+                      "timestamp": "2023-06-15T12:00:00+00:00",
+                      "components": [
+                        {
+                          "type": 10,
+                          "content": "rich text the summary parser does not model"
+                        }
+                      ]
+                    }
+                    """
+                )
+                .RootElement
+        );
+
     private static async ValueTask SeedMessageParentsAsync(SqliteExportStore store)
     {
         var guild = new Guild(new Snowflake(100), "Guild", "https://example.com/icon.png");
@@ -107,6 +139,65 @@ public class DatabaseMediaSpecs
         await store.UpsertGuildAsync(guild);
         await store.UpsertChannelAsync(channel);
         await store.UpsertUserAsync(user, null, Array.Empty<Role>());
+    }
+
+    [Fact]
+    public async Task Db_tracks_guild_boost_status_and_daily_member_count()
+    {
+        using var db = TempFile.Create();
+
+        var guild = Guild.Parse(
+            JsonDocument
+                .Parse(
+                    """
+                    {
+                      "id": "100",
+                      "name": "Guild",
+                      "icon": null,
+                      "banner": null,
+                      "premium_tier": 2,
+                      "premium_subscription_count": 7,
+                      "approximate_member_count": 1234
+                    }
+                    """
+                )
+                .RootElement
+        );
+
+        await using (var store = await SqliteExportStore.OpenAsync(db.Path))
+        {
+            await store.UpsertGuildAsync(guild);
+            await store.UpsertGuildAsync(guild with { ApproximateMemberCount = 1235 });
+            await store.FlushAsync();
+        }
+
+        (await ExecuteScalarLongAsync(db.Path, "SELECT premium_tier FROM guild WHERE id = 100;"))
+            .Should()
+            .Be(2);
+        (
+            await ExecuteScalarLongAsync(
+                db.Path,
+                "SELECT premium_subscription_count FROM guild WHERE id = 100;"
+            )
+        )
+            .Should()
+            .Be(7);
+        (
+            await ExecuteScalarLongAsync(
+                db.Path,
+                "SELECT approximate_member_count FROM guild WHERE id = 100;"
+            )
+        )
+            .Should()
+            .Be(1235);
+        (
+            await ExecuteScalarLongAsync(
+                db.Path,
+                "SELECT COUNT(*) FROM guild_member_count_snapshot WHERE guild_id = 100;"
+            )
+        )
+            .Should()
+            .Be(1);
     }
 
     [Fact]
@@ -204,5 +295,56 @@ public class DatabaseMediaSpecs
         }
 
         (await ExecuteScalarLongAsync(db.Path, "SELECT COUNT(*) FROM media_asset;")).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Db_records_poll_vote_events()
+    {
+        using var db = TempFile.Create();
+
+        await using (var store = await SqliteExportStore.OpenAsync(db.Path))
+        {
+            await store.InsertPollVoteEventAsync(
+                new Snowflake(300),
+                new Snowflake(10),
+                3,
+                new Snowflake(1),
+                true
+            );
+            await store.FlushAsync();
+        }
+
+        (
+            await ExecuteScalarLongAsync(
+                db.Path,
+                "SELECT COUNT(*) FROM poll_vote_event WHERE message_id = 10 AND answer_id = 3 AND user_id = 1 AND is_added = 1;"
+            )
+        )
+            .Should()
+            .Be(1);
+    }
+
+    [Fact]
+    public async Task Db_preserves_raw_component_payloads()
+    {
+        using var db = TempFile.Create();
+
+        await using (var store = await SqliteExportStore.OpenAsync(db.Path))
+        {
+            await SeedMessageParentsAsync(store);
+            await store.UpsertMessageAsync(new Snowflake(300), ParseComponentMessage());
+            await store.FlushAsync();
+        }
+
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = db.Path }.ToString()
+        );
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT components_raw_json FROM message WHERE id = 11;";
+
+        ((string)(await command.ExecuteScalarAsync())!)
+            .Should()
+            .Contain("rich text the summary parser does not model");
     }
 }

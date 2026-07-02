@@ -31,7 +31,8 @@ public partial record Message(
     Interaction? Interaction,
     Snowflake? WebhookId = null,
     Poll? Poll = null,
-    IReadOnlyList<MessageComponent>? Components = null
+    IReadOnlyList<MessageComponent>? Components = null,
+    string? ComponentsRawJson = null
 ) : IHasId
 {
     public IReadOnlyList<MessageComponent> Components { get; } = Components ?? [];
@@ -198,6 +199,8 @@ public partial record Message
 
         var poll = json.GetPropertyOrNull("poll")?.Pipe(Poll.Parse);
 
+        var componentsRawJson = json.GetPropertyOrNull("components")?.GetRawText();
+
         var components =
             json.GetPropertyOrNull("components")
                 ?.EnumerateArrayOrNull()
@@ -226,7 +229,8 @@ public partial record Message
             interaction,
             webhookId,
             poll,
-            components
+            components,
+            componentsRawJson
         );
     }
 }

@@ -190,6 +190,8 @@ A folder containing the assets will be created along with the exported chat. The
 When exporting to the SQLite database format (`-f Db`) or using `watchguild --media`, Discord-hosted media is saved
 next to the database by default in a sharded media directory (for example, `attachments/ab/cd/file.png`) and the local
 paths are recorded in the database. This avoids putting very large numbers of files into one folder.
+SQLite database exports also store guild boost status and keep one member-count snapshot per guild per UTC day when
+Discord provides the count.
 
 #### Reusing assets
 

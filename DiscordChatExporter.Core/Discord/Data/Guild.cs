@@ -6,8 +6,15 @@ using PowerKit.Extensions;
 namespace DiscordChatExporter.Core.Discord.Data;
 
 // https://discord.com/developers/docs/resources/guild#guild-object
-public partial record Guild(Snowflake Id, string Name, string IconUrl, string? BannerUrl = null)
-    : IHasId
+public partial record Guild(
+    Snowflake Id,
+    string Name,
+    string IconUrl,
+    string? BannerUrl = null,
+    int? PremiumTier = null,
+    int? PremiumSubscriptionCount = null,
+    int? ApproximateMemberCount = null
+) : IHasId
 {
     public bool IsDirect { get; } = Id == Snowflake.Zero;
 }
@@ -33,6 +40,18 @@ public partial record Guild
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(h => ImageCdn.GetGuildBannerUrl(id, h));
 
-        return new Guild(id, name, iconUrl, bannerUrl);
+        var approximateMemberCount =
+            json.GetPropertyOrNull("approximate_member_count")?.GetInt32OrNull()
+            ?? json.GetPropertyOrNull("member_count")?.GetInt32OrNull();
+
+        return new Guild(
+            id,
+            name,
+            iconUrl,
+            bannerUrl,
+            json.GetPropertyOrNull("premium_tier")?.GetInt32OrNull(),
+            json.GetPropertyOrNull("premium_subscription_count")?.GetInt32OrNull(),
+            approximateMemberCount
+        );
     }
 }

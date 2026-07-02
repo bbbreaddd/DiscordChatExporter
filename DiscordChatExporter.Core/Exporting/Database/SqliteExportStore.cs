@@ -100,6 +100,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (4, Schema.V4),
         (5, Schema.V5),
         (6, Schema.V6),
+        (7, Schema.V7),
+        (8, Schema.V8),
+        (9, Schema.V9),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -471,19 +474,68 @@ public sealed class SqliteExportStore : IAsyncDisposable
 
             await using var command = CreateCommand(
                 """
-                INSERT INTO guild (id, name, icon_url, banner_url)
-                VALUES ($id, $name, $iconUrl, $bannerUrl)
+                INSERT INTO guild (
+                    id, name, icon_url, banner_url,
+                    premium_tier, premium_subscription_count, approximate_member_count
+                )
+                VALUES (
+                    $id, $name, $iconUrl, $bannerUrl,
+                    $premiumTier, $premiumSubscriptionCount, $approximateMemberCount
+                )
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     icon_url = excluded.icon_url,
-                    banner_url = excluded.banner_url;
+                    banner_url = excluded.banner_url,
+                    premium_tier = excluded.premium_tier,
+                    premium_subscription_count = excluded.premium_subscription_count,
+                    approximate_member_count = excluded.approximate_member_count;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(guild.Id));
             command.Parameters.AddWithValue("$name", guild.Name);
             command.Parameters.AddWithValue("$iconUrl", OrNull(guild.IconUrl));
             command.Parameters.AddWithValue("$bannerUrl", OrNull(guild.BannerUrl));
+            command.Parameters.AddWithValue("$premiumTier", OrNull(guild.PremiumTier));
+            command.Parameters.AddWithValue(
+                "$premiumSubscriptionCount",
+                OrNull(guild.PremiumSubscriptionCount)
+            );
+            command.Parameters.AddWithValue(
+                "$approximateMemberCount",
+                OrNull(guild.ApproximateMemberCount)
+            );
             await command.ExecuteNonQueryAsync(cancellationToken);
+
+            if (guild.ApproximateMemberCount is not null)
+            {
+                await using var snapshot = CreateCommand(
+                    """
+                    INSERT INTO guild_member_count_snapshot (
+                        guild_id, snapshot_date, approximate_member_count, recorded_at
+                    )
+                    VALUES ($guildId, $snapshotDate, $approximateMemberCount, $recordedAt)
+                    ON CONFLICT(guild_id, snapshot_date) DO UPDATE SET
+                        approximate_member_count = excluded.approximate_member_count,
+                        recorded_at = excluded.recorded_at;
+                    """
+                );
+                snapshot.Parameters.AddWithValue("$guildId", ToDbId(guild.Id));
+                snapshot.Parameters.AddWithValue(
+                    "$snapshotDate",
+                    DateOnly
+                        .FromDateTime(DateTime.UtcNow)
+                        .ToString("O", CultureInfo.InvariantCulture)
+                );
+                snapshot.Parameters.AddWithValue(
+                    "$approximateMemberCount",
+                    guild.ApproximateMemberCount.Value
+                );
+                snapshot.Parameters.AddWithValue(
+                    "$recordedAt",
+                    DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+                );
+                await snapshot.ExecuteNonQueryAsync(cancellationToken);
+            }
 
             await InsertMediaAsync(iconMedia, cancellationToken);
             await InsertMediaAsync(bannerMedia, cancellationToken);
@@ -908,6 +960,48 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
+    public async ValueTask InsertPollVoteEventAsync(
+        Snowflake channelId,
+        Snowflake messageId,
+        int answerId,
+        Snowflake userId,
+        bool isAdded,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO poll_vote_event (
+                    message_id, channel_id, answer_id, user_id, is_added, recorded_at
+                ) VALUES (
+                    $messageId, $channelId, $answerId, $userId, $isAdded, $recordedAt
+                );
+                """
+            );
+            command.Parameters.AddWithValue("$messageId", ToDbId(messageId));
+            command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+            command.Parameters.AddWithValue("$answerId", answerId);
+            command.Parameters.AddWithValue("$userId", ToDbId(userId));
+            command.Parameters.AddWithValue("$isAdded", isAdded ? 1 : 0);
+            command.Parameters.AddWithValue(
+                "$recordedAt",
+                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+            );
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private async ValueTask UpsertMessageCoreAsync(
         Snowflake channelId,
         Message message,
@@ -958,12 +1052,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     id, channel_id, author_id, kind, timestamp, edited_timestamp,
                     call_ended_timestamp, is_pinned, content, reference_json,
                     forwarded_message_json, interaction_json, embeds_json, stickers_json,
-                    inline_emojis_json, webhook_id, poll_json, components_json
+                    inline_emojis_json, webhook_id, poll_json, components_json, components_raw_json
                 ) VALUES (
                     $id, $channelId, $authorId, $kind, $timestamp, $editedTimestamp,
                     $callEndedTimestamp, $isPinned, $content, $referenceJson,
                     $forwardedMessageJson, $interactionJson, $embedsJson, $stickersJson,
-                    $inlineEmojisJson, $webhookId, $pollJson, $componentsJson
+                    $inlineEmojisJson, $webhookId, $pollJson, $componentsJson, $componentsRawJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     channel_id = excluded.channel_id,
@@ -982,7 +1076,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     inline_emojis_json = excluded.inline_emojis_json,
                     webhook_id = excluded.webhook_id,
                     poll_json = excluded.poll_json,
-                    components_json = excluded.components_json;
+                    components_json = excluded.components_json,
+                    components_raw_json = excluded.components_raw_json;
                 """
             )
         )
@@ -1033,6 +1128,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$webhookId", ToDbId(message.WebhookId));
             command.Parameters.AddWithValue("$pollJson", OrNull(pollJson));
             command.Parameters.AddWithValue("$componentsJson", OrNull(componentsJson));
+            command.Parameters.AddWithValue(
+                "$componentsRawJson",
+                OrNull(message.ComponentsRawJson)
+            );
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
 

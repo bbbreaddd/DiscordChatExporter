@@ -258,4 +258,37 @@ internal static class Schema
         ALTER TABLE media_asset ADD COLUMN blob_id INTEGER REFERENCES media_blob(id);
         CREATE INDEX IF NOT EXISTS media_asset_blob ON media_asset(blob_id);
         """;
+
+    public const string V7 = """
+        CREATE TABLE IF NOT EXISTS poll_vote_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            answer_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            is_added INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS poll_vote_event_message ON poll_vote_event(message_id);
+        CREATE INDEX IF NOT EXISTS poll_vote_event_user ON poll_vote_event(user_id);
+        """;
+
+    public const string V8 = """
+        ALTER TABLE message ADD COLUMN components_raw_json TEXT;
+        """;
+
+    public const string V9 = """
+        ALTER TABLE guild ADD COLUMN premium_tier INTEGER;
+        ALTER TABLE guild ADD COLUMN premium_subscription_count INTEGER;
+        ALTER TABLE guild ADD COLUMN approximate_member_count INTEGER;
+
+        CREATE TABLE IF NOT EXISTS guild_member_count_snapshot (
+            guild_id INTEGER NOT NULL REFERENCES guild(id) ON DELETE CASCADE,
+            snapshot_date TEXT NOT NULL,
+            approximate_member_count INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (guild_id, snapshot_date)
+        );
+        """;
 }
