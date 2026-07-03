@@ -44,6 +44,13 @@ public class ChannelExporter(DiscordClient discord)
         await databaseStore.UpsertGuildAsync(request.Guild, cancellationToken);
         await databaseStore.UpsertChannelAsync(request.Channel, cancellationToken);
 
+        // Commit now, before any of the checks below can throw (e.g. an empty channel). The
+        // caller rolls back the pending transaction on a non-fatal failure so that a channel's
+        // partially-fetched messages don't linger half-written -- but this channel's own
+        // metadata (name, position, category, ...) is already complete and correct at this
+        // point, and must survive that rollback rather than reverting to a stale prior value.
+        await databaseStore.FlushAsync(cancellationToken);
+
         var storedState = await databaseStore.GetChannelStateAsync(
             request.Channel.Id,
             cancellationToken

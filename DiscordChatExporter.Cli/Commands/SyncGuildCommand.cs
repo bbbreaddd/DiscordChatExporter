@@ -151,6 +151,16 @@ public partial class SyncGuildCommand : DiscordCommandBase
             scheduledEventCount++;
         }
 
+        // Categories are filtered out everywhere channels are exported (they have no messages
+        // of their own), so this is the only place their own id/name/position ever gets
+        // persisted -- otherwise a category's relative order to its sibling categories is lost,
+        // even though each channel's order *within* its category is stored on the channel row.
+        await foreach (var channel in discord.GetGuildChannelsAsync(guildId, cancellationToken))
+        {
+            if (channel.IsCategory)
+                await store.UpsertChannelAsync(channel, cancellationToken);
+        }
+
         await store.FlushAsync(cancellationToken);
         return (roleCount, emojiCount, stickerCount, scheduledEventCount);
     }
