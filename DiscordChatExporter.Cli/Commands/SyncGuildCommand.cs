@@ -8,6 +8,7 @@ using CliFx.Infrastructure;
 using DiscordChatExporter.Cli;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Core.Discord;
+using DiscordChatExporter.Core.Discord.Data;
 using DiscordChatExporter.Core.Exporting;
 using DiscordChatExporter.Core.Exporting.Database;
 
@@ -151,13 +152,14 @@ public partial class SyncGuildCommand : DiscordCommandBase
             scheduledEventCount++;
         }
 
-        // Categories are filtered out everywhere channels are exported (they have no messages
-        // of their own), so this is the only place their own id/name/position ever gets
-        // persisted -- otherwise a category's relative order to its sibling categories is lost,
-        // even though each channel's order *within* its category is stored on the channel row.
+        // Categories and forums are both filtered out everywhere channels are exported (a
+        // category has no messages of its own, and a forum's "messages" are really its threads,
+        // exported individually), so this is the only place their own id/name/position ever gets
+        // persisted -- otherwise their relative order among their siblings is lost, even though
+        // each channel's/thread's order *within* its container is stored on its own row.
         await foreach (var channel in discord.GetGuildChannelsAsync(guildId, cancellationToken))
         {
-            if (channel.IsCategory)
+            if (channel.IsCategory || channel.Kind == ChannelKind.GuildForum)
                 await store.UpsertChannelAsync(channel, cancellationToken);
         }
 
