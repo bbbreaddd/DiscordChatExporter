@@ -315,4 +315,12 @@ internal static class Schema
         ALTER TABLE role ADD COLUMN secondary_color TEXT;
         ALTER TABLE role ADD COLUMN tertiary_color TEXT;
         """;
+
+    // Tracks how far a --force-full-scan pass has actually gotten for a channel, separately from
+    // last_message_id (which a normal incremental run also advances). Lets a second
+    // --force-full-scan invocation -- e.g. resuming after a crash partway through a guild-wide
+    // pass -- skip channels it already fully re-walked instead of re-walking them from scratch.
+    public const string V12 = """
+        ALTER TABLE channel ADD COLUMN force_scanned_message_id INTEGER;
+        """;
 }

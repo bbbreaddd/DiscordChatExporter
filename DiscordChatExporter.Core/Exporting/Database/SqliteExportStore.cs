@@ -121,6 +121,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (9, Schema.V9),
         (10, Schema.V10),
         (11, Schema.V11),
+        (12, Schema.V12),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -735,7 +736,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
         DateTimeOffset lastExportedAt,
         Snowflake? lastExportAfter,
         Snowflake? lastExportBefore,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        // Only passed (non-null) when this completion was a --force-full-scan run, so a normal
+        // incremental run never touches (and can't accidentally clear) the force-scan watermark.
+        Snowflake? forceScannedMessageId = null
     )
     {
         await _lock.WaitAsync(cancellationToken);
@@ -750,7 +754,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     is_archived = $isArchived,
                     last_exported_at = $lastExportedAt,
                     last_export_after = $lastExportAfter,
-                    last_export_before = $lastExportBefore
+                    last_export_before = $lastExportBefore,
+                    force_scanned_message_id = COALESCE(
+                        $forceScannedMessageId,
+                        force_scanned_message_id
+                    )
                 WHERE id = $id;
                 """
             );
@@ -762,6 +770,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
             );
             command.Parameters.AddWithValue("$lastExportAfter", ToDbId(lastExportAfter));
             command.Parameters.AddWithValue("$lastExportBefore", ToDbId(lastExportBefore));
+            command.Parameters.AddWithValue(
+                "$forceScannedMessageId",
+                ToDbId(forceScannedMessageId)
+            );
             command.Parameters.AddWithValue("$id", ToDbId(channelId));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
@@ -835,7 +847,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
         string? ParentCategory,
         Snowflake? LastMessageId,
         Snowflake? LastExportAfter,
-        Snowflake? LastExportBefore
+        Snowflake? LastExportBefore,
+        Snowflake? ForceScannedMessageId
     );
 
     // Cheap existence probe used by the live watcher's direct-upsert fast path: a message row
@@ -872,7 +885,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await using var command = CreateCommand(
                 """
                 SELECT kind, name, topic, category_id, category, parent_category_id,
-                       parent_category, last_message_id, last_export_after, last_export_before
+                       parent_category, last_message_id, last_export_after, last_export_before,
+                       force_scanned_message_id
                 FROM channel
                 WHERE id = $channelId;
                 """
@@ -893,7 +907,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 reader.IsDBNull(6) ? null : reader.GetString(6),
                 reader.IsDBNull(7) ? null : FromDbId(reader.GetInt64(7)),
                 reader.IsDBNull(8) ? null : FromDbId(reader.GetInt64(8)),
-                reader.IsDBNull(9) ? null : FromDbId(reader.GetInt64(9))
+                reader.IsDBNull(9) ? null : FromDbId(reader.GetInt64(9)),
+                reader.IsDBNull(10) ? null : FromDbId(reader.GetInt64(10))
             );
         }
         finally

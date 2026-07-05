@@ -72,6 +72,22 @@ public class ChannelExporter(DiscordClient discord)
             return;
         }
 
+        // Same idea, but for --force-full-scan specifically: if this channel already went
+        // through a full force-scan covering everything up to its current last message (e.g. a
+        // prior --force-full-scan run reached and finished it before crashing on some other,
+        // later channel), there's nothing left to backfill -- skip the redundant full re-walk
+        // rather than re-fetching potentially years of history all over again.
+        if (
+            request.ForceFullScan
+            && storedState is not null
+            && storedState.ForceScannedMessageId == request.Channel.LastMessageId
+            && stateMatchesRequest
+        )
+        {
+            progress?.Report(new ExportProgress(Percentage.FromFraction(1.0)));
+            return;
+        }
+
         // Only trust the stored LastMessageId as a resume point when this run's After/Before
         // (and channel metadata) match the run that produced it. Otherwise (e.g. the user
         // widened --after to backfill older history), clamping fetchAfter to LastMessageId would
@@ -86,6 +102,21 @@ public class ChannelExporter(DiscordClient discord)
         {
             fetchAfter =
                 fetchAfter is not null && fetchAfter > lastMessageId ? fetchAfter : lastMessageId;
+        }
+        // A channel that's already been through one full force-scan (the skip above didn't fire
+        // only because new messages have since arrived) doesn't need another full re-walk --
+        // everything up to the watermark was already backfilled, so just catch up on what's new,
+        // the same way the non-force path resumes from LastMessageId.
+        else if (
+            request.ForceFullScan
+            && stateMatchesRequest
+            && storedState?.ForceScannedMessageId is { } forceScannedMessageId
+        )
+        {
+            fetchAfter =
+                fetchAfter is not null && fetchAfter > forceScannedMessageId
+                    ? fetchAfter
+                    : forceScannedMessageId;
         }
 
         // Forum channels don't have messages; an empty/filtered-out channel produces nothing to
@@ -171,13 +202,23 @@ public class ChannelExporter(DiscordClient discord)
                         maxMessageId = message.Id;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw; // always propagate cancellation
+            }
             catch (Exception ex)
             {
+                // A plain (non-DiscordChatExporterException) failure here is usually a transient
+                // network hiccup (e.g. a cut-off HTTP response) -- one bad message must not be
+                // fatal to a run spanning tens of thousands of channels/threads. Only escalate if
+                // the underlying exception was already explicitly marked fatal (auth failure,
+                // unrecognized HTTP error, ...); everything else just fails this one channel and
+                // lets the caller move on to the next.
                 throw new DiscordChatExporterException(
                     $"Failed to export message #{message.Id} "
                         + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
                         + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                    ex is DiscordChatExporterException dex && dex.IsFatal,
                     ex
                 );
             }
@@ -190,7 +231,10 @@ public class ChannelExporter(DiscordClient discord)
             DateTimeOffset.UtcNow,
             request.After,
             request.Before,
-            cancellationToken
+            cancellationToken,
+            forceScannedMessageId: request.ForceFullScan
+                ? maxMessageId ?? request.Channel.LastMessageId
+                : null
         );
 
         // Commit now so a channel that completes successfully is never rolled back by a later
@@ -446,13 +490,20 @@ public class ChannelExporter(DiscordClient discord)
                                         newMaxMessageId = message.Id;
                                 }
                             }
+                            catch (OperationCanceledException)
+                            {
+                                throw; // always propagate cancellation
+                            }
                             catch (Exception ex)
                             {
+                                // See the DB export path's identical catch for why this defaults
+                                // to non-fatal: a transient per-message failure must not crash a
+                                // run spanning tens of thousands of channels/threads.
                                 throw new DiscordChatExporterException(
                                     $"Failed to export message #{message.Id} "
                                         + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
                                         + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                    ex is DiscordChatExporterException dex && dex.IsFatal,
                                     ex
                                 );
                             }
@@ -800,13 +851,20 @@ public class ChannelExporter(DiscordClient discord)
                                         maxMessageId = message.Id;
                                 }
                             }
+                            catch (OperationCanceledException)
+                            {
+                                throw; // always propagate cancellation
+                            }
                             catch (Exception ex)
                             {
+                                // See the DB export path's identical catch for why this defaults
+                                // to non-fatal: a transient per-message failure must not crash a
+                                // run spanning tens of thousands of channels/threads.
                                 throw new DiscordChatExporterException(
                                     $"Failed to export message #{message.Id} "
                                         + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
                                         + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                    ex is DiscordChatExporterException dex && dex.IsFatal,
                                     ex
                                 );
                             }
@@ -832,13 +890,20 @@ public class ChannelExporter(DiscordClient discord)
                                         maxMessageId = message.Id;
                                 }
                             }
+                            catch (OperationCanceledException)
+                            {
+                                throw; // always propagate cancellation
+                            }
                             catch (Exception ex)
                             {
+                                // See the DB export path's identical catch for why this defaults
+                                // to non-fatal: a transient per-message failure must not crash a
+                                // run spanning tens of thousands of channels/threads.
                                 throw new DiscordChatExporterException(
                                     $"Failed to export message #{message.Id} "
                                         + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
                                         + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                                    ex is not DiscordChatExporterException dex || dex.IsFatal,
+                                    ex is DiscordChatExporterException dex && dex.IsFatal,
                                     ex
                                 );
                             }
