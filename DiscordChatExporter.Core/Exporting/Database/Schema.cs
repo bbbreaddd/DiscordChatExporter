@@ -323,4 +323,53 @@ internal static class Schema
     public const string V12 = """
         ALTER TABLE channel ADD COLUMN force_scanned_message_id INTEGER;
         """;
+
+    // Soft-delete markers for the four entity kinds that can be removed on Discord but weren't
+    // previously distinguishable from "just hasn't been touched recently": channel/thread
+    // deletion (via CHANNEL_DELETE/THREAD_DELETE), role deletion (GUILD_ROLE_DELETE), and
+    // emoji/sticker removal (detected by diffing the full list GUILD_EMOJIS_UPDATE/
+    // GUILD_STICKERS_UPDATE already deliver against what's in the DB, since Discord doesn't
+    // send a granular per-item delete event for either). NULL means still present.
+    //
+    // Also adds the guild-level configuration fields and welcome-screen/onboarding/forum-tag/
+    // banner data identified as gaps when auditing what's needed to fully replicate a guild's
+    // structure (not just its message history). Most of these are stored as raw passthrough
+    // JSON rather than normalized columns -- they're read-mostly reference data, not something
+    // the exporter needs to transform for JSON/HTML output, and SQLite's json_extract can query
+    // into them later if needed.
+    public const string V13 = """
+        ALTER TABLE channel ADD COLUMN deleted_at TEXT;
+        ALTER TABLE role ADD COLUMN deleted_at TEXT;
+        ALTER TABLE guild_emoji ADD COLUMN deleted_at TEXT;
+        ALTER TABLE guild_sticker ADD COLUMN deleted_at TEXT;
+
+        ALTER TABLE guild ADD COLUMN verification_level INTEGER;
+        ALTER TABLE guild ADD COLUMN explicit_content_filter INTEGER;
+        ALTER TABLE guild ADD COLUMN mfa_level INTEGER;
+        ALTER TABLE guild ADD COLUMN system_channel_id INTEGER;
+        ALTER TABLE guild ADD COLUMN rules_channel_id INTEGER;
+        ALTER TABLE guild ADD COLUMN public_updates_channel_id INTEGER;
+        ALTER TABLE guild ADD COLUMN afk_channel_id INTEGER;
+        ALTER TABLE guild ADD COLUMN afk_timeout INTEGER;
+        ALTER TABLE guild ADD COLUMN preferred_locale TEXT;
+        ALTER TABLE guild ADD COLUMN vanity_url_code TEXT;
+        ALTER TABLE guild ADD COLUMN features_json TEXT;
+        ALTER TABLE guild ADD COLUMN welcome_screen_json TEXT;
+        ALTER TABLE guild ADD COLUMN onboarding_json TEXT;
+
+        ALTER TABLE channel ADD COLUMN available_tags_json TEXT;
+        ALTER TABLE channel ADD COLUMN applied_tags_json TEXT;
+
+        ALTER TABLE "user" ADD COLUMN banner_url TEXT;
+        ALTER TABLE "user" ADD COLUMN accent_color TEXT;
+
+        CREATE TABLE IF NOT EXISTS thread_member (
+            channel_id INTEGER NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL,
+            join_timestamp TEXT NOT NULL,
+            flags INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (channel_id, user_id)
+        );
+        CREATE INDEX IF NOT EXISTS thread_member_user ON thread_member(user_id);
+        """;
 }

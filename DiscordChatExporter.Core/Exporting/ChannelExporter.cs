@@ -44,6 +44,31 @@ public class ChannelExporter(DiscordClient discord)
         await databaseStore.UpsertGuildAsync(request.Guild, cancellationToken);
         await databaseStore.UpsertChannelAsync(request.Channel, cancellationToken);
 
+        // Thread member lists have no dedicated export path of their own (they're not messages),
+        // so piggyback on every thread export/catch-up/force-scan pass instead of a separate
+        // backfill job. NOTE: for a bot without the privileged GUILD_MEMBERS intent, this list
+        // endpoint 403s unconditionally (see the long comment on GetThreadMembersAsync) -- it
+        // still yields an empty sequence rather than throwing in that case, so this table simply
+        // stays empty rather than turning into a fatal failure for the whole channel export.
+        if (request.Channel.IsThread)
+        {
+            var threadMembers = new List<ThreadMember>();
+            await foreach (
+                var threadMember in discord.GetThreadMembersAsync(
+                    request.Channel.Id,
+                    cancellationToken
+                )
+            )
+            {
+                threadMembers.Add(threadMember);
+            }
+            await databaseStore.UpsertThreadMembersAsync(
+                request.Channel.Id,
+                threadMembers,
+                cancellationToken
+            );
+        }
+
         // Commit now, before any of the checks below can throw (e.g. an empty channel). The
         // caller rolls back the pending transaction on a non-fatal failure so that a channel's
         // partially-fetched messages don't linger half-written -- but this channel's own

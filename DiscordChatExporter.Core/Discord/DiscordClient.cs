@@ -500,6 +500,74 @@ public class DiscordClient
         return Guild.Parse(response);
     }
 
+    // Onboarding requires MANAGE_GUILD, which this bot may not have -- tolerate a missing
+    // response the same way TryGetGuildMemberAsync/TryGetUserAsync do, rather than failing the
+    // whole sync over one guild-config extra. Returned as raw JSON text (not modeled
+    // field-by-field): this is read-mostly reference data, not something the exporter needs to
+    // transform for JSON/HTML output.
+    public async ValueTask<string?> TryGetGuildOnboardingJsonAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (guildId == Guild.DirectMessages.Id)
+            return null;
+
+        var response = await TryGetJsonResponseAsync(
+            $"guilds/{guildId}/onboarding",
+            cancellationToken
+        );
+        return response?.GetRawText();
+    }
+
+    // https://discord.com/developers/docs/resources/channel#list-thread-members
+    // Paginated the same way GetMessagesAsync is (100 per page, cursor via the last-seen id),
+    // except the cursor here is a user id, not a message id -- thread member lists are typically
+    // small (far under 100), so most threads finish in a single page.
+    //
+    // with_member=false was chosen assuming it would avoid needing the privileged GUILD_MEMBERS
+    // intent, but that turned out to be wrong: empirically (verified 2026-07-05 against a bot
+    // that only has the message content intent), this *list* endpoint returns 403 "Missing
+    // Access" regardless of with_member -- the intent gates the endpoint itself, not just the
+    // nested member object. A single-id lookup (GET .../thread-members/{user.id}) is NOT gated
+    // (returns 404 "unknown member" instead of 403 for the same bot/thread), but that's not
+    // useful here since the whole point is discovering *which* ids are members. Left as
+    // with_member=false anyway (harmless, and correct if the intent is ever enabled) --
+    // TryGetJsonResponseAsync returning null on the 403 means this yields an empty sequence
+    // rather than throwing, so it fails safe for bots without the intent.
+    public async IAsyncEnumerable<ThreadMember> GetThreadMembersAsync(
+        Snowflake threadId,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default
+    )
+    {
+        var currentAfter = Snowflake.Zero;
+        while (true)
+        {
+            var url = new UrlBuilder()
+                .SetPath($"channels/{threadId}/thread-members")
+                .SetQueryParameter("with_member", "false")
+                .SetQueryParameter("limit", "100")
+                .SetQueryParameter("after", currentAfter.ToString())
+                .Build();
+
+            var response = await TryGetJsonResponseAsync(url, cancellationToken);
+            if (response is null)
+                yield break;
+
+            var members = response.Value.EnumerateArray().Select(ThreadMember.Parse).ToArray();
+            if (members.Length <= 0)
+                yield break;
+
+            foreach (var member in members)
+                yield return member;
+
+            currentAfter = members.Max(m => m.UserId);
+
+            if (members.Length < 100)
+                yield break;
+        }
+    }
+
     public async IAsyncEnumerable<Channel> GetGuildChannelsAsync(
         Snowflake guildId,
         [EnumeratorCancellation] CancellationToken cancellationToken = default

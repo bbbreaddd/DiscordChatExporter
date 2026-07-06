@@ -120,28 +120,66 @@ public partial class SyncGuildCommand : DiscordCommandBase
     )
     {
         var guild = await discord.GetGuildAsync(guildId, cancellationToken);
-        await store.UpsertGuildAsync(guild, cancellationToken);
 
+        // Onboarding lives at its own endpoint (not part of the guild object), and the bot may
+        // lack MANAGE_GUILD to read it -- TryGetGuildOnboardingJsonAsync tolerates that and
+        // returns null, which UpsertGuildAsync's COALESCE then treats as "keep whatever we last
+        // knew" rather than clobbering a previously-fetched value.
+        var onboardingJson = await discord.TryGetGuildOnboardingJsonAsync(
+            guildId,
+            cancellationToken
+        );
+        await store.UpsertGuildAsync(
+            guild with
+            {
+                OnboardingJson = onboardingJson,
+            },
+            cancellationToken
+        );
+
+        // Roles/emoji/stickers have no granular delete event worth relying on alone (emoji and
+        // stickers have none at all -- Discord only ever sends the full current list -- and even
+        // though Discord does send GUILD_ROLE_DELETE, it's simplest to fold it into the same
+        // resync as CREATE/UPDATE rather than parse it out separately). So every sync diffs the
+        // live list against what the DB still considers active and soft-deletes anything no
+        // longer present, in addition to upserting what's still there.
+        var deletedAt = DateTimeOffset.UtcNow;
+
+        var activeRoleIds = await store.GetActiveRoleIdsAsync(guildId, cancellationToken);
         var roleCount = 0;
         await foreach (var role in discord.GetGuildRolesAsync(guildId, cancellationToken))
         {
             await store.UpsertRoleAsync(role, guildId, cancellationToken);
+            activeRoleIds.Remove(role.Id);
             roleCount++;
         }
+        foreach (var removedId in activeRoleIds)
+            await store.MarkRoleDeletedAsync(removedId, deletedAt, cancellationToken);
 
+        var activeEmojiIds = await store.GetActiveGuildEmojiIdsAsync(guildId, cancellationToken);
         var emojiCount = 0;
         await foreach (var emoji in discord.GetGuildEmojisAsync(guildId, cancellationToken))
         {
             await store.UpsertGuildEmojiAsync(emoji, guildId, cancellationToken);
+            activeEmojiIds.Remove(emoji.Id);
             emojiCount++;
         }
+        foreach (var removedId in activeEmojiIds)
+            await store.MarkGuildEmojiDeletedAsync(removedId, deletedAt, cancellationToken);
 
+        var activeStickerIds = await store.GetActiveGuildStickerIdsAsync(
+            guildId,
+            cancellationToken
+        );
         var stickerCount = 0;
         await foreach (var sticker in discord.GetGuildStickersAsync(guildId, cancellationToken))
         {
             await store.UpsertGuildStickerAsync(sticker, guildId, cancellationToken);
+            activeStickerIds.Remove(sticker.Id);
             stickerCount++;
         }
+        foreach (var removedId in activeStickerIds)
+            await store.MarkGuildStickerDeletedAsync(removedId, deletedAt, cancellationToken);
 
         var scheduledEventCount = 0;
         await foreach (
@@ -157,11 +195,27 @@ public partial class SyncGuildCommand : DiscordCommandBase
         // exported individually), so this is the only place their own id/name/position ever gets
         // persisted -- otherwise their relative order among their siblings is lost, even though
         // each channel's/thread's order *within* its container is stored on its own row.
+        //
+        // This is also the deletion safety net for regular/category/forum channels missed while
+        // the watcher was offline (CHANNEL_DELETE is handled live, but only catches channels
+        // deleted while connected). Threads have no equivalent here -- GetGuildChannelsAsync
+        // doesn't return them, and a full thread listing on every sync would be far too
+        // expensive -- so a thread deleted purely during downtime relies on THREAD_DELETE having
+        // been live at the time, same limitation as several other live-only signals in this tool.
+        var activeChannelIds = await store.GetActiveCategoryAndForumIdsAsync(
+            guildId,
+            cancellationToken
+        );
         await foreach (var channel in discord.GetGuildChannelsAsync(guildId, cancellationToken))
         {
             if (channel.IsCategory || channel.Kind == ChannelKind.GuildForum)
+            {
                 await store.UpsertChannelAsync(channel, cancellationToken);
+                activeChannelIds.Remove(channel.Id);
+            }
         }
+        foreach (var removedId in activeChannelIds)
+            await store.MarkChannelDeletedAsync(removedId, deletedAt, cancellationToken);
 
         await store.FlushAsync(cancellationToken);
         return (roleCount, emojiCount, stickerCount, scheduledEventCount);

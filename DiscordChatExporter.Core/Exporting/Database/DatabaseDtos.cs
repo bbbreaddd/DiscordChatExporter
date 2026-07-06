@@ -43,7 +43,11 @@ internal record UserDto(
     DateTimeOffset? JoinedAt,
     DateTimeOffset? PremiumSince,
     DateTimeOffset? CommunicationDisabledUntil,
-    bool Pending
+    bool Pending,
+    // Global profile banner/accent color -- Discord's guild member object has no per-guild
+    // banner, unlike avatar, so there's nothing to prefer over these.
+    string? BannerUrl = null,
+    string? AccentColor = null
 );
 
 internal record AttachmentDto(string Id, string Url, string FileName, long FileSizeBytes);
@@ -204,7 +208,9 @@ internal static class DatabaseJson
             member?.JoinedAt,
             member?.PremiumSince,
             member?.CommunicationDisabledUntil,
-            member?.Pending ?? false
+            member?.Pending ?? false,
+            user.BannerUrl,
+            ToHex(user.AccentColor)
         );
     }
 

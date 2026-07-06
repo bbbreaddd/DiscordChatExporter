@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Text.Json;
 using DiscordChatExporter.Core.Discord.Data.Common;
 using JsonExtensions.Reading;
@@ -15,7 +16,12 @@ public partial record User(
     int? Discriminator,
     string Name,
     string DisplayName,
-    string AvatarUrl
+    string AvatarUrl,
+    // Global (not per-guild -- Discord's guild member object has no per-guild banner) profile
+    // banner/accent color. Only present on a full user fetch (message author, direct
+    // GET user/{id}), not on the cut-down user object embedded elsewhere.
+    string? BannerUrl = null,
+    Color? AccentColor = null
 ) : IHasId
 {
     public string DiscriminatorFormatted { get; } =
@@ -51,6 +57,25 @@ public partial record User
                 ?.Pipe(h => ImageCdn.GetUserAvatarUrl(id, h))
             ?? ImageCdn.GetFallbackUserAvatarUrl(avatarIndex);
 
-        return new User(id, isBot, discriminator, name, displayName, avatarUrl);
+        var bannerUrl = json.GetPropertyOrNull("banner")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => ImageCdn.GetUserBannerUrl(id, h));
+
+        var accentColor = json.GetPropertyOrNull("accent_color")
+            ?.GetInt32OrNull()
+            ?.Pipe(System.Drawing.Color.FromArgb)
+            .WithFullAlpha()
+            .NullIf(c => c.ToRgb() <= 0);
+
+        return new User(
+            id,
+            isBot,
+            discriminator,
+            name,
+            displayName,
+            avatarUrl,
+            bannerUrl,
+            accentColor
+        );
     }
 }

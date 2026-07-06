@@ -122,6 +122,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (10, Schema.V10),
         (11, Schema.V11),
         (12, Schema.V12),
+        (13, Schema.V13),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -574,11 +575,19 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 """
                 INSERT INTO guild (
                     id, name, icon_url, banner_url,
-                    premium_tier, premium_subscription_count, approximate_member_count
+                    premium_tier, premium_subscription_count, approximate_member_count,
+                    verification_level, explicit_content_filter, mfa_level,
+                    system_channel_id, rules_channel_id, public_updates_channel_id,
+                    afk_channel_id, afk_timeout, preferred_locale, vanity_url_code,
+                    features_json, welcome_screen_json, onboarding_json
                 )
                 VALUES (
                     $id, $name, $iconUrl, $bannerUrl,
-                    $premiumTier, $premiumSubscriptionCount, $approximateMemberCount
+                    $premiumTier, $premiumSubscriptionCount, $approximateMemberCount,
+                    $verificationLevel, $explicitContentFilter, $mfaLevel,
+                    $systemChannelId, $rulesChannelId, $publicUpdatesChannelId,
+                    $afkChannelId, $afkTimeout, $preferredLocale, $vanityUrlCode,
+                    $featuresJson, $welcomeScreenJson, $onboardingJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
@@ -586,7 +595,23 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     banner_url = excluded.banner_url,
                     premium_tier = excluded.premium_tier,
                     premium_subscription_count = excluded.premium_subscription_count,
-                    approximate_member_count = excluded.approximate_member_count;
+                    approximate_member_count = excluded.approximate_member_count,
+                    verification_level = excluded.verification_level,
+                    explicit_content_filter = excluded.explicit_content_filter,
+                    mfa_level = excluded.mfa_level,
+                    system_channel_id = excluded.system_channel_id,
+                    rules_channel_id = excluded.rules_channel_id,
+                    public_updates_channel_id = excluded.public_updates_channel_id,
+                    afk_channel_id = excluded.afk_channel_id,
+                    afk_timeout = excluded.afk_timeout,
+                    preferred_locale = excluded.preferred_locale,
+                    vanity_url_code = excluded.vanity_url_code,
+                    features_json = excluded.features_json,
+                    welcome_screen_json = excluded.welcome_screen_json,
+                    -- onboarding is fetched separately (not part of the guild object itself) and
+                    -- may not always be re-supplied, so COALESCE keeps the last known value
+                    -- instead of clobbering it with NULL on a call that didn't fetch it.
+                    onboarding_json = COALESCE(excluded.onboarding_json, guild.onboarding_json);
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(guild.Id));
@@ -602,6 +627,25 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 "$approximateMemberCount",
                 OrNull(guild.ApproximateMemberCount)
             );
+            command.Parameters.AddWithValue("$verificationLevel", OrNull(guild.VerificationLevel));
+            command.Parameters.AddWithValue(
+                "$explicitContentFilter",
+                OrNull(guild.ExplicitContentFilter)
+            );
+            command.Parameters.AddWithValue("$mfaLevel", OrNull(guild.MfaLevel));
+            command.Parameters.AddWithValue("$systemChannelId", ToDbId(guild.SystemChannelId));
+            command.Parameters.AddWithValue("$rulesChannelId", ToDbId(guild.RulesChannelId));
+            command.Parameters.AddWithValue(
+                "$publicUpdatesChannelId",
+                ToDbId(guild.PublicUpdatesChannelId)
+            );
+            command.Parameters.AddWithValue("$afkChannelId", ToDbId(guild.AfkChannelId));
+            command.Parameters.AddWithValue("$afkTimeout", OrNull(guild.AfkTimeout));
+            command.Parameters.AddWithValue("$preferredLocale", OrNull(guild.PreferredLocale));
+            command.Parameters.AddWithValue("$vanityUrlCode", OrNull(guild.VanityUrlCode));
+            command.Parameters.AddWithValue("$featuresJson", OrNull(guild.FeaturesJson));
+            command.Parameters.AddWithValue("$welcomeScreenJson", OrNull(guild.WelcomeScreenJson));
+            command.Parameters.AddWithValue("$onboardingJson", OrNull(guild.OnboardingJson));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             if (guild.ApproximateMemberCount is not null)
@@ -670,11 +714,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 INSERT INTO channel (
                     id, guild_id, kind, category_id, category, parent_category_id,
                     parent_category, name, topic, position, is_archived, nsfw,
-                    slowmode_seconds, bitrate, user_limit, permission_overwrites_json
+                    slowmode_seconds, bitrate, user_limit, permission_overwrites_json,
+                    available_tags_json, applied_tags_json
                 ) VALUES (
                     $id, $guildId, $kind, $categoryId, $category, $parentCategoryId,
                     $parentCategory, $name, $topic, $position, $isArchived, $nsfw,
-                    $slowmodeSeconds, $bitrate, $userLimit, $permissionOverwritesJson
+                    $slowmodeSeconds, $bitrate, $userLimit, $permissionOverwritesJson,
+                    $availableTagsJson, $appliedTagsJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     guild_id = excluded.guild_id,
@@ -691,7 +737,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     slowmode_seconds = excluded.slowmode_seconds,
                     bitrate = excluded.bitrate,
                     user_limit = excluded.user_limit,
-                    permission_overwrites_json = excluded.permission_overwrites_json;
+                    permission_overwrites_json = excluded.permission_overwrites_json,
+                    available_tags_json = excluded.available_tags_json,
+                    applied_tags_json = excluded.applied_tags_json,
+                    -- A successful upsert is proof the channel currently exists, so clear any
+                    -- stale soft-delete marker.
+                    deleted_at = NULL;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(channel.Id));
@@ -719,6 +770,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 "$permissionOverwritesJson",
                 OrNull(permissionOverwritesJson)
             );
+            command.Parameters.AddWithValue(
+                "$availableTagsJson",
+                OrNull(channel.AvailableTagsJson)
+            );
+            command.Parameters.AddWithValue("$appliedTagsJson", OrNull(channel.AppliedTagsJson));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
@@ -949,6 +1005,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
             keepHistory: false,
             cancellationToken
         );
+        var bannerMedia = await TryDownloadMediaAsync(
+            "user",
+            userId,
+            "user-banners",
+            dto.BannerUrl,
+            keepHistory: false,
+            cancellationToken
+        );
 
         await _lock.WaitAsync(cancellationToken);
         try
@@ -959,10 +1023,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 """
                 INSERT INTO "user" (
                     id, is_bot, discriminator, name, display_name, color, avatar_url, roles_json,
-                    joined_at, premium_since, communication_disabled_until, pending
+                    joined_at, premium_since, communication_disabled_until, pending,
+                    banner_url, accent_color
                 ) VALUES (
                     $id, $isBot, $discriminator, $name, $displayName, $color, $avatarUrl, $rolesJson,
-                    $joinedAt, $premiumSince, $communicationDisabledUntil, $pending
+                    $joinedAt, $premiumSince, $communicationDisabledUntil, $pending,
+                    $bannerUrl, $accentColor
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     is_bot = excluded.is_bot,
@@ -975,7 +1041,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     joined_at = excluded.joined_at,
                     premium_since = excluded.premium_since,
                     communication_disabled_until = excluded.communication_disabled_until,
-                    pending = excluded.pending;
+                    pending = excluded.pending,
+                    banner_url = excluded.banner_url,
+                    accent_color = excluded.accent_color;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(userId));
@@ -999,9 +1067,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 OrNull(dto.CommunicationDisabledUntil?.ToString("O", CultureInfo.InvariantCulture))
             );
             command.Parameters.AddWithValue("$pending", dto.Pending ? 1 : 0);
+            command.Parameters.AddWithValue("$bannerUrl", OrNull(dto.BannerUrl));
+            command.Parameters.AddWithValue("$accentColor", OrNull(dto.AccentColor));
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await InsertMediaAsync(avatarMedia, cancellationToken);
+            await InsertMediaAsync(bannerMedia, cancellationToken);
 
             await MaybeAutoFlushAsync(cancellationToken);
         }
@@ -1391,6 +1462,254 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
+    // Shared by the soft-delete diff passes in SyncGuildAsync (roles/emoji/stickers don't get a
+    // channel-style live existence check, and emoji/stickers have no granular delete event at
+    // all -- Discord only ever sends the full current list via GUILD_EMOJIS_UPDATE/
+    // GUILD_STICKERS_UPDATE) and by the live GUILD_ROLE_DELETE/CHANNEL_DELETE/THREAD_DELETE
+    // gateway handlers in WatchGuildCommand, which already know the specific id and can mark it
+    // immediately without waiting for the next full sync.
+    private async ValueTask<bool> MarkDeletedAsync(
+        string table,
+        Snowflake id,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                $"""
+                UPDATE {table} SET deleted_at = $deletedAt
+                WHERE id = $id AND deleted_at IS NULL;
+                """
+            );
+            command.Parameters.AddWithValue(
+                "$deletedAt",
+                deletedAt.ToString("O", CultureInfo.InvariantCulture)
+            );
+            command.Parameters.AddWithValue("$id", ToDbId(id));
+            var rowsAffected = await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+
+            return rowsAffected > 0;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // `table` is always one of the four fixed literals below (never user input), so building
+    // the SQL via interpolation here is safe -- SQLite has no parameter placeholder for table
+    // names.
+    public ValueTask<bool> MarkChannelDeletedAsync(
+        Snowflake channelId,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken = default
+    ) => MarkDeletedAsync("channel", channelId, deletedAt, cancellationToken);
+
+    public ValueTask<bool> MarkRoleDeletedAsync(
+        Snowflake roleId,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken = default
+    ) => MarkDeletedAsync("role", roleId, deletedAt, cancellationToken);
+
+    public ValueTask<bool> MarkGuildEmojiDeletedAsync(
+        Snowflake emojiId,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken = default
+    ) => MarkDeletedAsync("guild_emoji", emojiId, deletedAt, cancellationToken);
+
+    public ValueTask<bool> MarkGuildStickerDeletedAsync(
+        Snowflake stickerId,
+        DateTimeOffset deletedAt,
+        CancellationToken cancellationToken = default
+    ) => MarkDeletedAsync("guild_sticker", stickerId, deletedAt, cancellationToken);
+
+    // Used by SyncGuildAsync's deletion-diff safety net: fetch the ids we currently believe are
+    // still active for a guild, so anything missing from a fresh live listing can be marked
+    // deleted. `table` and `extraWhere` are always fixed literals from the callers below, never
+    // user input.
+    private async ValueTask<HashSet<Snowflake>> GetActiveIdsAsync(
+        string table,
+        Snowflake guildId,
+        string? extraWhere,
+        CancellationToken cancellationToken
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                $"""
+                SELECT id FROM {table}
+                WHERE guild_id = $guildId AND deleted_at IS NULL {extraWhere};
+                """
+            );
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+
+            var ids = new HashSet<Snowflake>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                ids.Add(FromDbId(reader.GetInt64(0)));
+
+            return ids;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public ValueTask<HashSet<Snowflake>> GetActiveRoleIdsAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    ) => GetActiveIdsAsync("role", guildId, null, cancellationToken);
+
+    public ValueTask<HashSet<Snowflake>> GetActiveGuildEmojiIdsAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    ) => GetActiveIdsAsync("guild_emoji", guildId, null, cancellationToken);
+
+    public ValueTask<HashSet<Snowflake>> GetActiveGuildStickerIdsAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    ) => GetActiveIdsAsync("guild_sticker", guildId, null, cancellationToken);
+
+    // Only categories/forums, matching what SyncGuildAsync itself upserts from
+    // GetGuildChannelsAsync (regular channels/threads are covered by their own export path, not
+    // this presync step).
+    public ValueTask<HashSet<Snowflake>> GetActiveCategoryAndForumIdsAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    ) =>
+        GetActiveIdsAsync(
+            "channel",
+            guildId,
+            "AND kind IN ('GuildCategory', 'GuildForum')",
+            cancellationToken
+        );
+
+    private async ValueTask UpsertThreadMemberCoreAsync(
+        Snowflake channelId,
+        ThreadMember member,
+        CancellationToken cancellationToken
+    )
+    {
+        await using var command = CreateCommand(
+            """
+            INSERT INTO thread_member (channel_id, user_id, join_timestamp, flags)
+            VALUES ($channelId, $userId, $joinTimestamp, $flags)
+            ON CONFLICT(channel_id, user_id) DO UPDATE SET
+                join_timestamp = excluded.join_timestamp,
+                flags = excluded.flags;
+            """
+        );
+        command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+        command.Parameters.AddWithValue("$userId", ToDbId(member.UserId));
+        command.Parameters.AddWithValue(
+            "$joinTimestamp",
+            member.JoinTimestamp.ToString("O", CultureInfo.InvariantCulture)
+        );
+        command.Parameters.AddWithValue("$flags", member.Flags);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    // Full-list replace (delete then re-insert everything currently returned by the API),
+    // mirroring the same "no granular per-item event, so diff/replace the whole catalog"
+    // approach used for guild emoji/stickers. Called whenever a thread gets (re-)exported, so
+    // the list stays fresh on every normal/force-scan/catch-up pass without needing its own
+    // separate backfill job.
+    public async ValueTask UpsertThreadMembersAsync(
+        Snowflake channelId,
+        IReadOnlyList<ThreadMember> members,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using (
+                var delete = CreateCommand(
+                    "DELETE FROM thread_member WHERE channel_id = $channelId;"
+                )
+            )
+            {
+                delete.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+                await delete.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            foreach (var member in members)
+                await UpsertThreadMemberCoreAsync(channelId, member, cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // Incremental counterparts driven directly by THREAD_MEMBERS_UPDATE's added_members/
+    // removed_member_ids, so a live join/leave doesn't require re-fetching the whole thread's
+    // member list.
+    public async ValueTask AddThreadMembersAsync(
+        Snowflake channelId,
+        IReadOnlyList<ThreadMember> members,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            foreach (var member in members)
+                await UpsertThreadMemberCoreAsync(channelId, member, cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask RemoveThreadMembersAsync(
+        Snowflake channelId,
+        IReadOnlyList<Snowflake> userIds,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            foreach (var userId in userIds)
+            {
+                await using var command = CreateCommand(
+                    "DELETE FROM thread_member WHERE channel_id = $channelId AND user_id = $userId;"
+                );
+                command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+                command.Parameters.AddWithValue("$userId", ToDbId(userId));
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async ValueTask UpsertRoleAsync(
         Role role,
         Snowflake guildId,
@@ -1432,7 +1751,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     mentionable = excluded.mentionable,
                     icon_url = excluded.icon_url,
                     unicode_emoji = excluded.unicode_emoji,
-                    managed = excluded.managed;
+                    managed = excluded.managed,
+                    -- A successful upsert is proof the role currently exists, so clear any
+                    -- stale soft-delete marker (e.g. from a diff pass that ran during a
+                    -- transient API hiccup).
+                    deleted_at = NULL;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(role.Id));
@@ -1506,7 +1829,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     image_url = excluded.image_url,
                     creator_id = excluded.creator_id,
                     is_available = excluded.is_available,
-                    is_managed = excluded.is_managed;
+                    is_managed = excluded.is_managed,
+                    deleted_at = NULL;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(emoji.Id));
@@ -1564,7 +1888,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     format = excluded.format,
                     source_url = excluded.source_url,
                     creator_id = excluded.creator_id,
-                    is_available = excluded.is_available;
+                    is_available = excluded.is_available,
+                    deleted_at = NULL;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(sticker.Id));

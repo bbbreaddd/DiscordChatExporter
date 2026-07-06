@@ -23,7 +23,12 @@ public partial record Channel(
     bool IsNsfw = false,
     int? SlowmodeSeconds = null,
     int? Bitrate = null,
-    int? UserLimit = null
+    int? UserLimit = null,
+    // Forum tag definitions (on the forum channel itself) and applied tags (on a thread that
+    // belongs to a forum) -- raw passthrough JSON, same rationale as Guild's FeaturesJson/
+    // WelcomeScreenJson: reference data, not something the exporter needs to transform.
+    string? AvailableTagsJson = null,
+    string? AppliedTagsJson = null
 ) : IHasId
 {
     public bool IsDirect { get; } =
@@ -120,6 +125,8 @@ public partial record Channel
         var slowmodeSeconds = json.GetPropertyOrNull("rate_limit_per_user")?.GetInt32OrNull();
         var bitrate = json.GetPropertyOrNull("bitrate")?.GetInt32OrNull();
         var userLimit = json.GetPropertyOrNull("user_limit")?.GetInt32OrNull();
+        var availableTagsJson = json.GetPropertyOrNull("available_tags")?.GetRawText();
+        var appliedTagsJson = json.GetPropertyOrNull("applied_tags")?.GetRawText();
 
         return new Channel(
             id,
@@ -136,7 +143,9 @@ public partial record Channel
             isNsfw,
             slowmodeSeconds,
             bitrate,
-            userLimit
+            userLimit,
+            availableTagsJson,
+            appliedTagsJson
         );
     }
 }

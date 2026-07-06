@@ -420,7 +420,52 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     case "GUILD_SCHEDULED_EVENT_CREATE":
                     case "GUILD_SCHEDULED_EVENT_UPDATE":
                     case "GUILD_SCHEDULED_EVENT_DELETE":
+                    // Roles have no per-item CREATE/UPDATE parsing here because SyncGuildAsync
+                    // already re-upserts every current role on each sync -- including deletion:
+                    // it diffs the live role list against the DB and soft-deletes anything
+                    // missing, so GUILD_ROLE_DELETE doesn't need its own direct-mark handler
+                    // either.
+                    case "GUILD_ROLE_CREATE":
+                    case "GUILD_ROLE_UPDATE":
+                    case "GUILD_ROLE_DELETE":
                         queue.EnqueueGuildSync(eventType);
+                        break;
+
+                    case "CHANNEL_DELETE":
+                    case "THREAD_DELETE":
+                        {
+                            var channelId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            queue.EnqueueChannelDelete(channelId);
+                        }
+                        break;
+
+                    case "THREAD_MEMBERS_UPDATE":
+                        {
+                            var channelId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+
+                            var addedMembers = data.TryGetProperty(
+                                "added_members",
+                                out var addedProp
+                            )
+                                ? addedProp.EnumerateArray().Select(ThreadMember.Parse).ToArray()
+                                : [];
+
+                            var removedMemberIds = data.TryGetProperty(
+                                "removed_member_ids",
+                                out var removedProp
+                            )
+                                ? removedProp
+                                    .EnumerateArray()
+                                    .Select(x => Snowflake.Parse(x.GetString()!))
+                                    .ToArray()
+                                : [];
+
+                            queue.EnqueueThreadMembersUpdate(
+                                channelId,
+                                addedMembers,
+                                removedMemberIds
+                            );
+                        }
                         break;
 
                     case "MESSAGE_REACTION_ADD":
@@ -883,6 +928,36 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Marked messages deleted."
                 );
+        }
+        else if (item is MarkChannelDeletedItem channelDelete)
+        {
+            var wasMarked = await store.MarkChannelDeletedAsync(
+                channelDelete.ChannelId,
+                DateTimeOffset.UtcNow,
+                cancellationToken
+            );
+            await store.FlushAsync(cancellationToken);
+            if (wasMarked)
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Marked channel {channelDelete.ChannelId} deleted."
+                    );
+        }
+        else if (item is ThreadMembersUpdateItem threadUpdate)
+        {
+            if (threadUpdate.AddedMembers.Count > 0)
+                await store.AddThreadMembersAsync(
+                    threadUpdate.ChannelId,
+                    threadUpdate.AddedMembers,
+                    cancellationToken
+                );
+            if (threadUpdate.RemovedMemberIds.Count > 0)
+                await store.RemoveThreadMembersAsync(
+                    threadUpdate.ChannelId,
+                    threadUpdate.RemovedMemberIds,
+                    cancellationToken
+                );
+            await store.FlushAsync(cancellationToken);
         }
         else if (item is SyncGuildItem sync)
         {

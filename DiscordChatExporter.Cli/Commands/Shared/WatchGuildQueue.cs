@@ -26,6 +26,21 @@ public record PollVoteItem(
 
 public record MarkDeletedItem(Snowflake ChannelId, IReadOnlyList<Snowflake> MessageIds) : QueueItem;
 
+// CHANNEL_DELETE/THREAD_DELETE. Channels/categories/forums also get a diff-based safety net in
+// SyncGuildAsync (for anything missed while the watcher was offline), but a thread has no cheap
+// "list everything" call to diff against, so this direct id-based mark is the only mechanism for
+// those.
+public record MarkChannelDeletedItem(Snowflake ChannelId) : QueueItem;
+
+// THREAD_MEMBERS_UPDATE. Kept separate from a full ChannelExporter re-export (which also
+// refreshes the thread member list wholesale) since a join/leave is much cheaper to apply
+// directly from the gateway payload than to trigger a debounced channel export for.
+public record ThreadMembersUpdateItem(
+    Snowflake ChannelId,
+    IReadOnlyList<ThreadMember> AddedMembers,
+    IReadOnlyList<Snowflake> RemovedMemberIds
+) : QueueItem;
+
 public record SyncGuildItem(string Reason) : QueueItem;
 
 public record ExportChannelItem(
@@ -51,6 +66,8 @@ public class WatchGuildQueue
     // should land in the database within a poll tick, not after a debounce window).
     private readonly Queue<UpsertMessageItem> _pendingMessages = new();
     private readonly Queue<PollVoteItem> _pendingPollVotes = new();
+    private readonly Queue<MarkChannelDeletedItem> _pendingChannelDeletes = new();
+    private readonly Queue<ThreadMembersUpdateItem> _pendingThreadMemberUpdates = new();
 
     private readonly Dictionary<Snowflake, PendingExport> _pendingExports = new();
     private readonly Dictionary<string, PendingPatch> _pendingPatches = new();
@@ -61,6 +78,8 @@ public class WatchGuildQueue
     private readonly Dictionary<Snowflake, int> _channelFailures = new();
     private readonly Dictionary<string, int> _patchFailures = new();
     private readonly Dictionary<Snowflake, int> _deleteFailures = new();
+    private readonly Dictionary<Snowflake, int> _channelDeleteFailures = new();
+    private readonly Dictionary<Snowflake, int> _threadMemberUpdateFailures = new();
     private int _guildSyncFailures;
 
     public WatchGuildQueue(
@@ -285,6 +304,28 @@ public class WatchGuildQueue
         }
     }
 
+    public void EnqueueChannelDelete(Snowflake channelId)
+    {
+        lock (_lock)
+        {
+            _pendingChannelDeletes.Enqueue(new MarkChannelDeletedItem(channelId));
+        }
+    }
+
+    public void EnqueueThreadMembersUpdate(
+        Snowflake channelId,
+        IReadOnlyList<ThreadMember> addedMembers,
+        IReadOnlyList<Snowflake> removedMemberIds
+    )
+    {
+        lock (_lock)
+        {
+            _pendingThreadMemberUpdates.Enqueue(
+                new ThreadMembersUpdateItem(channelId, addedMembers, removedMemberIds)
+            );
+        }
+    }
+
     public void EnqueueGuildSync(string reason)
     {
         lock (_lock)
@@ -308,6 +349,12 @@ public class WatchGuildQueue
 
             if (_pendingPollVotes.Count > 0)
                 return _pendingPollVotes.Dequeue();
+
+            if (_pendingChannelDeletes.Count > 0)
+                return _pendingChannelDeletes.Dequeue();
+
+            if (_pendingThreadMemberUpdates.Count > 0)
+                return _pendingThreadMemberUpdates.Dequeue();
 
             var duePatch = _pendingPatches
                 .Where(p => p.Value.Due <= now)
@@ -386,6 +433,14 @@ public class WatchGuildQueue
             else if (item is SyncGuildItem)
             {
                 _guildSyncFailures = 0;
+            }
+            else if (item is MarkChannelDeletedItem channelDelete)
+            {
+                _channelDeleteFailures.Remove(channelDelete.ChannelId);
+            }
+            else if (item is ThreadMembersUpdateItem threadUpdate)
+            {
+                _threadMemberUpdateFailures.Remove(threadUpdate.ChannelId);
             }
         }
     }
@@ -477,6 +532,32 @@ public class WatchGuildQueue
 
                 _guildSyncDue = now + TimeSpan.FromSeconds(60 * _guildSyncFailures);
                 _guildSyncReason = sync.Reason;
+                return true;
+            }
+            else if (item is MarkChannelDeletedItem channelDelete)
+            {
+                _channelDeleteFailures.TryGetValue(channelDelete.ChannelId, out var count);
+                count++;
+                _channelDeleteFailures[channelDelete.ChannelId] = count;
+                if (count >= 3)
+                {
+                    _channelDeleteFailures.Remove(channelDelete.ChannelId);
+                    return false;
+                }
+                _pendingChannelDeletes.Enqueue(channelDelete);
+                return true;
+            }
+            else if (item is ThreadMembersUpdateItem threadUpdate)
+            {
+                _threadMemberUpdateFailures.TryGetValue(threadUpdate.ChannelId, out var count);
+                count++;
+                _threadMemberUpdateFailures[threadUpdate.ChannelId] = count;
+                if (count >= 3)
+                {
+                    _threadMemberUpdateFailures.Remove(threadUpdate.ChannelId);
+                    return false;
+                }
+                _pendingThreadMemberUpdates.Enqueue(threadUpdate);
                 return true;
             }
             return false;
