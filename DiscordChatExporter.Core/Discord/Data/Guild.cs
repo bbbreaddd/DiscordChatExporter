@@ -32,7 +32,11 @@ public partial record Guild(
     // Fetched separately (GET guilds/{id}/onboarding is its own endpoint, not part of the
     // guild object) -- populated via a `with` expression by whoever calls
     // DiscordClient.TryGetGuildOnboardingJsonAsync, not by Guild.Parse itself.
-    string? OnboardingJson = null
+    string? OnboardingJson = null,
+    Snowflake? OwnerId = null,
+    string? Description = null,
+    string? SplashUrl = null,
+    string? DiscoverySplashUrl = null
 ) : IHasId
 {
     public bool IsDirect { get; } = Id == Snowflake.Zero;
@@ -58,6 +62,14 @@ public partial record Guild
         var bannerUrl = json.GetPropertyOrNull("banner")
             ?.GetNonWhiteSpaceStringOrNull()
             ?.Pipe(h => ImageCdn.GetGuildBannerUrl(id, h));
+
+        var splashUrl = json.GetPropertyOrNull("splash")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => ImageCdn.GetGuildSplashUrl(id, h));
+
+        var discoverySplashUrl = json.GetPropertyOrNull("discovery_splash")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => ImageCdn.GetGuildDiscoverySplashUrl(id, h));
 
         var approximateMemberCount =
             json.GetPropertyOrNull("approximate_member_count")?.GetInt32OrNull()
@@ -87,7 +99,12 @@ public partial record Guild
             json.GetPropertyOrNull("preferred_locale")?.GetNonWhiteSpaceStringOrNull(),
             json.GetPropertyOrNull("vanity_url_code")?.GetNonWhiteSpaceStringOrNull(),
             json.GetPropertyOrNull("features")?.GetRawText(),
-            json.GetPropertyOrNull("welcome_screen")?.GetRawText()
+            json.GetPropertyOrNull("welcome_screen")?.GetRawText(),
+            OnboardingJson: null,
+            OwnerId: ParseSnowflakeOrNull("owner_id"),
+            Description: json.GetPropertyOrNull("description")?.GetStringOrNull(),
+            SplashUrl: splashUrl,
+            DiscoverySplashUrl: discoverySplashUrl
         );
     }
 }

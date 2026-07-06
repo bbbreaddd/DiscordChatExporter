@@ -18,6 +18,51 @@ namespace DiscordChatExporter.Core.Exporting;
 
 public class ChannelExporter(DiscordClient discord)
 {
+    // Populates each reaction's reactor list (Reaction.Users, otherwise always empty coming
+    // straight off a message payload -- Discord only inlines the emoji+count there) via
+    // DiscordClient.GetMessageReactionsAsync, one paginated call per unique emoji on the
+    // message. Mirrors what JsonMessageWriter.cs already does per-message for JSON exports;
+    // this is the DB-path equivalent, called unconditionally (including full/force-scan bulk
+    // exports, not just live reaction-event patches) per an explicit accepted cost tradeoff --
+    // a full re-scan of a guild with heavy reaction usage will take meaningfully longer as a
+    // result. GetMessageReactionsAsync already tolerates a non-success response by yielding
+    // nothing rather than throwing, so a reaction with no fetchable users just ends up with an
+    // empty list, never a failure.
+    public static async ValueTask<Message> EnrichReactionsWithUsersAsync(
+        DiscordClient discord,
+        Snowflake channelId,
+        Message message,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (message.Reactions.Count <= 0)
+            return message;
+
+        var enrichedReactions = new List<Reaction>(message.Reactions.Count);
+        foreach (var reaction in message.Reactions)
+        {
+            var users = new List<User>();
+            await foreach (
+                var user in discord.GetMessageReactionsAsync(
+                    channelId,
+                    message.Id,
+                    reaction.Emoji,
+                    cancellationToken
+                )
+            )
+            {
+                users.Add(user);
+            }
+
+            enrichedReactions.Add(reaction with { Users = users });
+        }
+
+        return message with
+        {
+            Reactions = enrichedReactions,
+        };
+    }
+
     // Live export straight into a consolidated SQLite database. Message IDs are globally unique
     // and the database enforces that via its primary key, so -- unlike the JSON path above --
     // there is no byte-level merge, partitioning, or crash-recovery machinery to replicate here:
@@ -217,9 +262,16 @@ public class ChannelExporter(DiscordClient discord)
 
                 if (request.MessageFilter.IsMatch(message))
                 {
-                    await databaseStore.UpsertMessageAsync(
+                    var enrichedMessage = await EnrichReactionsWithUsersAsync(
+                        discord,
                         request.Channel.Id,
                         message,
+                        cancellationToken
+                    );
+
+                    await databaseStore.UpsertMessageAsync(
+                        request.Channel.Id,
+                        enrichedMessage,
                         cancellationToken
                     );
 

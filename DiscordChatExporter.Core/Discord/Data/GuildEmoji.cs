@@ -13,7 +13,10 @@ public record GuildEmoji(
     string ImageUrl,
     Snowflake? CreatorId,
     bool IsAvailable,
-    bool IsManaged
+    bool IsManaged,
+    // Raw passthrough JSON array of role ids allowed to use this emoji (empty array "[]" means
+    // unrestricted -- same convention as the other reference-data JSON blobs added in V13/V14).
+    string? RoleIdsJson = null
 ) : IHasId
 {
     public static GuildEmoji Parse(JsonElement json)
@@ -30,7 +33,17 @@ public record GuildEmoji(
 
         var isAvailable = json.GetPropertyOrNull("available")?.GetBooleanOrNull() ?? true;
         var isManaged = json.GetPropertyOrNull("managed")?.GetBooleanOrNull() ?? false;
+        var roleIdsJson = json.GetPropertyOrNull("roles")?.GetRawText();
 
-        return new GuildEmoji(id, name, isAnimated, imageUrl, creatorId, isAvailable, isManaged);
+        return new GuildEmoji(
+            id,
+            name,
+            isAnimated,
+            imageUrl,
+            creatorId,
+            isAvailable,
+            isManaged,
+            roleIdsJson
+        );
     }
 }

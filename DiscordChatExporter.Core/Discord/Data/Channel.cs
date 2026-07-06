@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -28,7 +29,20 @@ public partial record Channel(
     // belongs to a forum) -- raw passthrough JSON, same rationale as Guild's FeaturesJson/
     // WelcomeScreenJson: reference data, not something the exporter needs to transform.
     string? AvailableTagsJson = null,
-    string? AppliedTagsJson = null
+    string? AppliedTagsJson = null,
+    // Thread creator (top-level owner_id) and Discord's own (capped/approximate) activity
+    // counters -- separate from thread_metadata below, and separate from the exact counts
+    // derivable by querying our own message table.
+    Snowflake? OwnerId = null,
+    int? MessageCount = null,
+    int? MemberCount = null,
+    int? TotalMessageSent = null,
+    // Remaining thread_metadata fields (archived is already captured above as IsArchived).
+    int? AutoArchiveDuration = null,
+    DateTimeOffset? ArchiveTimestamp = null,
+    bool IsLocked = false,
+    bool IsInvitable = true,
+    DateTimeOffset? CreateTimestamp = null
 ) : IHasId
 {
     public bool IsDirect { get; } =
@@ -104,11 +118,22 @@ public partial record Channel
 
         var topic = json.GetPropertyOrNull("topic")?.GetStringOrNull();
 
-        var isArchived =
-            json.GetPropertyOrNull("thread_metadata")
-                ?.GetPropertyOrNull("archived")
-                ?.GetBooleanOrNull()
-            ?? false;
+        var threadMetadata = json.GetPropertyOrNull("thread_metadata");
+
+        var isArchived = threadMetadata?.GetPropertyOrNull("archived")?.GetBooleanOrNull() ?? false;
+        var autoArchiveDuration = threadMetadata
+            ?.GetPropertyOrNull("auto_archive_duration")
+            ?.GetInt32OrNull();
+        var archiveTimestamp = threadMetadata
+            ?.GetPropertyOrNull("archive_timestamp")
+            ?.GetDateTimeOffsetOrNull();
+        var isLocked = threadMetadata?.GetPropertyOrNull("locked")?.GetBooleanOrNull() ?? false;
+        // Absent for threads created before this field existed; true is Discord's own default.
+        var isInvitable =
+            threadMetadata?.GetPropertyOrNull("invitable")?.GetBooleanOrNull() ?? true;
+        var createTimestamp = threadMetadata
+            ?.GetPropertyOrNull("create_timestamp")
+            ?.GetDateTimeOffsetOrNull();
 
         var lastMessageId = json.GetPropertyOrNull("last_message_id")
             ?.GetNonWhiteSpaceStringOrNull()
@@ -128,6 +153,13 @@ public partial record Channel
         var availableTagsJson = json.GetPropertyOrNull("available_tags")?.GetRawText();
         var appliedTagsJson = json.GetPropertyOrNull("applied_tags")?.GetRawText();
 
+        var ownerId = json.GetPropertyOrNull("owner_id")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(Snowflake.Parse);
+        var messageCount = json.GetPropertyOrNull("message_count")?.GetInt32OrNull();
+        var memberCount = json.GetPropertyOrNull("member_count")?.GetInt32OrNull();
+        var totalMessageSent = json.GetPropertyOrNull("total_message_sent")?.GetInt32OrNull();
+
         return new Channel(
             id,
             kind,
@@ -145,7 +177,16 @@ public partial record Channel
             bitrate,
             userLimit,
             availableTagsJson,
-            appliedTagsJson
+            appliedTagsJson,
+            ownerId,
+            messageCount,
+            memberCount,
+            totalMessageSent,
+            autoArchiveDuration,
+            archiveTimestamp,
+            isLocked,
+            isInvitable,
+            createTimestamp
         );
     }
 }

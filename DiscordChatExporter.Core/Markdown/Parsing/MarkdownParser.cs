@@ -480,6 +480,18 @@ internal static partial class MarkdownParser
     public static IReadOnlyList<EmojiNode> ExtractEmojis(string markdown) =>
         Extract<EmojiNode>(markdown);
 
+    // Channel mentions have no reliable top-level JSON field on the message object (Discord's
+    // `mention_channels` is only populated for channel-follow crossposts, not ordinary
+    // same-guild <#id> mentions), unlike role mentions (`mention_roles`, always present) and
+    // user mentions (`mentions`) -- so these are recovered from the already-parsed markdown
+    // instead, the same way inline emoji are.
+    public static IReadOnlyList<Snowflake> ExtractMentionedChannelIds(string markdown) =>
+        Extract<MentionNode>(markdown)
+            .Where(m => m.Kind == MentionKind.Channel && m.TargetId is not null)
+            .Select(m => m.TargetId!.Value)
+            .Distinct()
+            .ToArray();
+
     private static IReadOnlyList<MarkdownNode> Parse(
         MarkdownContext context,
         StringSegment segment

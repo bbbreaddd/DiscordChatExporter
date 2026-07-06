@@ -372,4 +372,44 @@ internal static class Schema
         );
         CREATE INDEX IF NOT EXISTS thread_member_user ON thread_member(user_id);
         """;
+
+    // Closes the remaining gaps from the have/don't-have audit against Discord's full data
+    // model: guild owner/description/splash images, role-restricted emoji, full thread
+    // metadata (owner, counts, archive settings), and role/channel mention indexing (mirroring
+    // the existing message_mention user-mention table). Reaction reactor lists (users_json on
+    // the existing `reaction` table) need no schema change -- that column and its
+    // serialization plumbing already exist; only the C# side was missing the fetch.
+    public const string V14 = """
+        ALTER TABLE guild ADD COLUMN owner_id INTEGER;
+        ALTER TABLE guild ADD COLUMN description TEXT;
+        ALTER TABLE guild ADD COLUMN splash_url TEXT;
+        ALTER TABLE guild ADD COLUMN discovery_splash_url TEXT;
+
+        ALTER TABLE guild_emoji ADD COLUMN role_ids_json TEXT;
+
+        ALTER TABLE channel ADD COLUMN owner_id INTEGER;
+        ALTER TABLE channel ADD COLUMN message_count INTEGER;
+        ALTER TABLE channel ADD COLUMN member_count INTEGER;
+        ALTER TABLE channel ADD COLUMN total_message_sent INTEGER;
+        ALTER TABLE channel ADD COLUMN auto_archive_duration INTEGER;
+        ALTER TABLE channel ADD COLUMN archive_timestamp TEXT;
+        ALTER TABLE channel ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE channel ADD COLUMN is_invitable INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE channel ADD COLUMN create_timestamp TEXT;
+
+        CREATE TABLE IF NOT EXISTS message_role_mention (
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            role_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, role_id)
+        );
+        CREATE INDEX IF NOT EXISTS message_role_mention_role ON message_role_mention(role_id);
+
+        CREATE TABLE IF NOT EXISTS message_channel_mention (
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, channel_id)
+        );
+        CREATE INDEX IF NOT EXISTS message_channel_mention_channel
+            ON message_channel_mention(channel_id);
+        """;
 }

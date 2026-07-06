@@ -79,7 +79,14 @@ public static class DatabaseMessagePatcher
             );
         }
 
-        await store.UpsertMessageAsync(request.Channel.Id, message, cancellationToken);
+        var enrichedMessage = await ChannelExporter.EnrichReactionsWithUsersAsync(
+            discord,
+            request.Channel.Id,
+            message,
+            cancellationToken
+        );
+
+        await store.UpsertMessageAsync(request.Channel.Id, enrichedMessage, cancellationToken);
         await store.FlushAsync(cancellationToken);
 
         return new MessagePatchResult(true, "Patched successfully.");

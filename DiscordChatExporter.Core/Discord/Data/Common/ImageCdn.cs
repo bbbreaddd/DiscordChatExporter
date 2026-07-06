@@ -42,6 +42,16 @@ public static class ImageCdn
             ? $"https://cdn.discordapp.com/banners/{guildId}/{bannerHash}.gif?size={size}"
             : $"https://cdn.discordapp.com/banners/{guildId}/{bannerHash}.png?size={size}";
 
+    // Splashes are never animated, unlike icons/banners -- no "a_" gif check needed.
+    public static string GetGuildSplashUrl(Snowflake guildId, string splashHash, int size = 512) =>
+        $"https://cdn.discordapp.com/splashes/{guildId}/{splashHash}.png?size={size}";
+
+    public static string GetGuildDiscoverySplashUrl(
+        Snowflake guildId,
+        string splashHash,
+        int size = 512
+    ) => $"https://cdn.discordapp.com/discovery-splashes/{guildId}/{splashHash}.png?size={size}";
+
     public static string GetChannelIconUrl(Snowflake channelId, string iconHash, int size = 512) =>
         iconHash.StartsWith("a_", StringComparison.Ordinal)
             ? $"https://cdn.discordapp.com/channel-icons/{channelId}/{iconHash}.gif?size={size}"

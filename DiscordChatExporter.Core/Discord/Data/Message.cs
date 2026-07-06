@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using DiscordChatExporter.Core.Discord.Data.Common;
 using DiscordChatExporter.Core.Discord.Data.Embeds;
+using DiscordChatExporter.Core.Markdown.Parsing;
 using JsonExtensions.Reading;
 using PowerKit.Extensions;
 
@@ -32,10 +33,16 @@ public partial record Message(
     Snowflake? WebhookId = null,
     Poll? Poll = null,
     IReadOnlyList<MessageComponent>? Components = null,
-    string? ComponentsRawJson = null
+    string? ComponentsRawJson = null,
+    IReadOnlyList<Snowflake>? MentionedRoleIds = null,
+    IReadOnlyList<Snowflake>? MentionedChannelIds = null
 ) : IHasId
 {
     public IReadOnlyList<MessageComponent> Components { get; } = Components ?? [];
+
+    public IReadOnlyList<Snowflake> MentionedRoleIds { get; } = MentionedRoleIds ?? [];
+
+    public IReadOnlyList<Snowflake> MentionedChannelIds { get; } = MentionedChannelIds ?? [];
 
     public bool IsEmpty { get; } =
         string.IsNullOrWhiteSpace(Content)
@@ -178,6 +185,15 @@ public partial record Message
             json.GetPropertyOrNull("mentions")?.EnumerateArrayOrNull()?.Select(User.Parse).ToArray()
             ?? [];
 
+        // Always present (possibly empty), unlike mention_channels (see MentionedChannelIds).
+        var mentionedRoleIds =
+            json.GetPropertyOrNull("mention_roles")
+                ?.EnumerateArrayOrNull()
+                ?.Select(j => j.GetNonWhiteSpaceString())
+                .Select(Snowflake.Parse)
+                .ToArray()
+            ?? [];
+
         var messageReference = json.GetPropertyOrNull("message_reference")
             ?.Pipe(MessageReference.Parse);
 
@@ -208,6 +224,10 @@ public partial record Message
                 .ToArray()
             ?? [];
 
+        // No reliable top-level field for this (see the comment on
+        // MarkdownParser.ExtractMentionedChannelIds), so it's recovered from content instead.
+        var mentionedChannelIds = MarkdownParser.ExtractMentionedChannelIds(content);
+
         return new Message(
             id,
             kind,
@@ -230,7 +250,9 @@ public partial record Message
             webhookId,
             poll,
             components,
-            componentsRawJson
+            componentsRawJson,
+            mentionedRoleIds,
+            mentionedChannelIds
         );
     }
 }
