@@ -82,14 +82,27 @@ public class WatchGuildQueue
     private readonly Dictionary<Snowflake, int> _threadMemberUpdateFailures = new();
     private int _guildSyncFailures;
 
+    // Bounds how many ExportChannelItem attempts the caller may have running at once.
+    // TryDequeue simply won't hand out another one while this cap is already reached; the
+    // caller (WatchGuildCommand's pump) runs each one on its own Task and calls
+    // ReportSuccess/ReportFailure exactly once when it finishes, which releases the slot here.
+    // Different channels/threads sit behind independent Discord rate-limit buckets, so running
+    // several at once doesn't increase pressure on any single bucket -- it's the live-message
+    // fast path, patches, deletes, and guild syncs that stay strictly sequential on the main
+    // loop, since those are already cheap/local and don't benefit from concurrency.
+    private readonly int _maxConcurrentExports;
+    private int _inFlightExports;
+
     public WatchGuildQueue(
         TimeSpan? channelDebounce = null,
         TimeSpan? channelMaxWait = null,
         TimeSpan? patchDebounce = null,
         TimeSpan? deleteDebounce = null,
-        TimeSpan? guildSyncDebounce = null
+        TimeSpan? guildSyncDebounce = null,
+        int maxConcurrentExports = 6
     )
     {
+        _maxConcurrentExports = Math.Max(1, maxConcurrentExports);
         // Channel exports are now only a background maintenance pass (cursor advance, gap-fill,
         // author/role enrichment) -- live messages are captured instantly by the direct-upsert
         // path -- so they run infrequently to avoid competing with those live writes on the
@@ -116,6 +129,15 @@ public class WatchGuildQueue
         {
             lock (_lock)
                 return _pendingExports.Count;
+        }
+    }
+
+    public int InFlightExportsCount
+    {
+        get
+        {
+            lock (_lock)
+                return _inFlightExports;
         }
     }
 
@@ -393,21 +415,25 @@ public class WatchGuildQueue
                 return new SyncGuildItem(reason);
             }
 
-            var dueExport = _pendingExports
-                .Where(e => e.Value.Due <= now)
-                .OrderBy(e => e.Value.Due)
-                .FirstOrDefault();
-
-            if (dueExport.Key != default(Snowflake))
+            if (_inFlightExports < _maxConcurrentExports)
             {
-                _pendingExports.Remove(dueExport.Key);
-                return new ExportChannelItem(
-                    dueExport.Value.ChannelId,
-                    dueExport.Value.FirstTimestamp,
-                    dueExport.Value.FirstQueuedAt,
-                    dueExport.Value.IsCatchup,
-                    dueExport.Value.ForceFullScan
-                );
+                var dueExport = _pendingExports
+                    .Where(e => e.Value.Due <= now)
+                    .OrderBy(e => e.Value.Due)
+                    .FirstOrDefault();
+
+                if (dueExport.Key != default(Snowflake))
+                {
+                    _pendingExports.Remove(dueExport.Key);
+                    _inFlightExports++;
+                    return new ExportChannelItem(
+                        dueExport.Value.ChannelId,
+                        dueExport.Value.FirstTimestamp,
+                        dueExport.Value.FirstQueuedAt,
+                        dueExport.Value.IsCatchup,
+                        dueExport.Value.ForceFullScan
+                    );
+                }
             }
 
             return null;
@@ -421,6 +447,7 @@ public class WatchGuildQueue
             if (item is ExportChannelItem export)
             {
                 _channelFailures.Remove(export.ChannelId);
+                _inFlightExports--;
             }
             else if (item is PatchMessageItem patch)
             {
@@ -464,6 +491,10 @@ public class WatchGuildQueue
             }
             if (item is ExportChannelItem export)
             {
+                // This attempt is finishing one way or another (retried later or dropped), so
+                // its concurrency slot is free regardless of which branch below is taken.
+                _inFlightExports--;
+
                 _channelFailures.TryGetValue(export.ChannelId, out var count);
                 count++;
                 _channelFailures[export.ChannelId] = count;

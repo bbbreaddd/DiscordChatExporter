@@ -75,6 +75,17 @@ public partial class WatchGuildCommand : DiscordCommandBase
     )]
     public bool RetryFailedMedia { get; set; }
 
+    [CommandOption(
+        "catch-up-parallel",
+        Description = "How many channel/thread exports (catch-up, scan-missing, or a debounced "
+            + "regular re-export) may run concurrently. Different channels/threads use "
+            + "independent Discord rate-limit buckets, so this is safe to raise well above 1 -- "
+            + "it does not increase pressure on any single channel's limit. Live messages, "
+            + "patches, deletes, and guild syncs are unaffected: they always run immediately on "
+            + "the main loop regardless of this setting, since they're already cheap/local."
+    )]
+    public int CatchUpParallel { get; set; } = 6;
+
     private readonly Dictionary<Snowflake, HashSet<Snowflake>> _knownPinnedIds = new();
 
     // Guards against re-running a full guild rescan on every gateway READY. A flapping
@@ -130,7 +141,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         var firstToken = Discord.Tokens[0];
-        var queue = new WatchGuildQueue();
+        var queue = new WatchGuildQueue(maxConcurrentExports: Math.Max(1, CatchUpParallel));
 
         await console.Output.WriteLineAsync(
             $"Starting watchguild for guild {GuildId} into '{OutputPath}'..."
@@ -646,7 +657,77 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
         var gatewayTask = Task.Run(() => gatewayClient.RunAsync(cts.Token), cts.Token);
 
+        // Processes one item and reports the outcome back to the queue. Shared between the
+        // sequential inline path (everything except channel exports) and the concurrent
+        // background path (channel exports only, see the loop below) so both go through
+        // identical error handling/retry/logging. Cancellation is deliberately left to
+        // propagate out uncaught -- what it means differs by caller (break the main loop vs.
+        // let a background task end quietly), so each call site handles it itself.
+        async Task ProcessAndReportAsync(QueueItem item, CancellationToken itemToken)
+        {
+            try
+            {
+                await ProcessQueueItemAsync(item, store, console, itemToken);
+                queue.ReportSuccess(item);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Flush (not rollback): with channel exports now running concurrently, other
+                // channels may have writes pending in this same shared store, and a rollback
+                // would discard theirs too. Safe to keep whatever's pending instead -- every
+                // write is idempotent and a channel's own cursor only advances on full success,
+                // so a partial attempt just gets harmlessly re-covered by the next run.
+                try
+                {
+                    await store.FlushAsync(CancellationToken.None);
+                }
+                catch (Exception flushEx)
+                {
+                    lock (console)
+                        console.Error.WriteLine(
+                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [flush-error] Failed to flush pending writes: {flushEx.Message}"
+                        );
+                }
+
+                lock (console)
+                {
+                    console.Error.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump-error] Error processing queue item: {ex.Message}"
+                    );
+                }
+
+                var retrying = queue.ReportFailure(item);
+                if (retrying)
+                {
+                    lock (console)
+                        console.Output.WriteLine(
+                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Re-queued item for retry."
+                        );
+                }
+                else
+                {
+                    lock (console)
+                        console.Error.WriteLine(
+                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Gave up on queue item after maximum retries."
+                        );
+                }
+            }
+        }
+
         var lastStatusLog = DateTimeOffset.UtcNow;
+
+        // Channel exports (catch-up backlog, scan-missing, debounced regular re-exports) run
+        // concurrently in the background -- WatchGuildQueue caps how many are in flight at once
+        // (--catch-up-parallel), so this list never grows past that bound. Everything else
+        // (live messages, patches, deletes, poll votes, guild sync) stays on the sequential
+        // inline path below: they're already cheap/local and don't benefit from concurrency,
+        // and some (e.g. the live-message fast path's _knownChannelIds cache) assume a single
+        // caller.
+        var inFlightExportTasks = new List<Task>();
 
         while (!cts.Token.IsCancellationRequested)
         {
@@ -656,7 +737,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 {
                     console.Output.WriteLine(
                         $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [status] queue status: "
-                            + $"messages={queue.PendingMessagesCount}, channels={queue.PendingChannelsCount}, patches={queue.PendingPatchesCount}, "
+                            + $"messages={queue.PendingMessagesCount}, channels={queue.PendingChannelsCount}, "
+                            + $"inFlightExports={queue.InFlightExportsCount}, patches={queue.PendingPatchesCount}, "
                             + $"pollVotes={queue.PendingPollVotesCount}, "
                             + $"deleteChannels={queue.PendingDeleteChannelsCount}, deleteMessages={queue.PendingDeleteMessagesCount}, "
                             + $"guildSync={(queue.IsGuildSyncPending ? "pending" : "idle")}"
@@ -665,54 +747,37 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 lastStatusLog = DateTimeOffset.UtcNow;
             }
 
+            inFlightExportTasks.RemoveAll(t => t.IsCompleted);
+
             var item = queue.TryDequeue();
-            if (item is not null)
+            if (item is ExportChannelItem)
+            {
+                inFlightExportTasks.Add(
+                    Task.Run(
+                        async () =>
+                        {
+                            try
+                            {
+                                await ProcessAndReportAsync(item, cts.Token);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // Shutting down -- let it end quietly, nothing more to do.
+                            }
+                        },
+                        cts.Token
+                    )
+                );
+            }
+            else if (item is not null)
             {
                 try
                 {
-                    await ProcessQueueItemAsync(item, store, console, cts.Token);
-                    queue.ReportSuccess(item);
+                    await ProcessAndReportAsync(item, cts.Token);
                 }
                 catch (OperationCanceledException) when (cts.Token.IsCancellationRequested)
                 {
                     break;
-                }
-                catch (Exception ex)
-                {
-                    try
-                    {
-                        await store.RollbackAsync(CancellationToken.None);
-                    }
-                    catch (Exception rbEx)
-                    {
-                        lock (console)
-                            console.Error.WriteLine(
-                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [rollback-error] Failed to rollback transaction: {rbEx.Message}"
-                            );
-                    }
-
-                    lock (console)
-                    {
-                        console.Error.WriteLine(
-                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump-error] Error processing queue item: {ex.Message}"
-                        );
-                    }
-
-                    var retrying = queue.ReportFailure(item);
-                    if (retrying)
-                    {
-                        lock (console)
-                            console.Output.WriteLine(
-                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Re-queued item for retry."
-                            );
-                    }
-                    else
-                    {
-                        lock (console)
-                            console.Error.WriteLine(
-                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Gave up on queue item after maximum retries."
-                            );
-                    }
                 }
             }
             else
@@ -729,6 +794,15 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 }
             }
         }
+
+        // Drain in-flight exports before the store gets disposed out from under them. Failures
+        // were already logged inside ProcessAndReportAsync; WhenAll here is just to wait, not to
+        // observe results.
+        try
+        {
+            await Task.WhenAll(inFlightExportTasks);
+        }
+        catch { }
 
         try
         {

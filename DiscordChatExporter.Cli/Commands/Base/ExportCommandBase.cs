@@ -601,15 +601,23 @@ public abstract class ExportCommandBase : DiscordCommandBase
                             }
                             catch (ChannelEmptyException ex)
                             {
+                                // Flush (not rollback) here: with --parallel > 1, other channels'
+                                // writes may currently be pending in this same shared store, and
+                                // a rollback would discard theirs too, not just this channel's.
+                                // Safe to keep whatever's pending for this channel instead of
+                                // discarding it -- every message write is idempotent and this
+                                // channel's own cursor only ever advances on full success, so a
+                                // partially-flushed attempt just gets harmlessly re-covered by
+                                // the next run.
                                 if (databaseStore is not null)
-                                    await databaseStore.RollbackAsync(CancellationToken.None);
+                                    await databaseStore.FlushAsync(CancellationToken.None);
 
                                 warningsByChannel[channel] = ex.Message;
                             }
                             catch (DiscordChatExporterException ex) when (!ex.IsFatal)
                             {
                                 if (databaseStore is not null)
-                                    await databaseStore.RollbackAsync(CancellationToken.None);
+                                    await databaseStore.FlushAsync(CancellationToken.None);
 
                                 errorsByChannel[channel] = ex.Message;
                             }
