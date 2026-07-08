@@ -75,6 +75,13 @@ public partial class ExportRequest
 
     public bool ForceFullScan { get; }
 
+    // Only meaningful for the 'Db' format. When false, a message's reactions are stored with just
+    // their emoji + count (already present in the message payload); when true, each reaction's full
+    // reactor list is fetched (one paginated request per unique emoji per message). Off by default
+    // because measurements showed reactor fetches can be ~45%+ of all requests on a bulk export --
+    // see the live-watch path, which captures live reactors from the gateway for free instead.
+    public bool EnrichReactors { get; }
+
     public ExportRequest(
         Guild guild,
         Channel channel,
@@ -96,7 +103,8 @@ public partial class ExportRequest
         bool isOfflineAssetMode = false,
         bool shouldUseHtmlSharedAssets = false,
         bool isCompact = false,
-        bool forceFullScan = false
+        bool forceFullScan = false,
+        bool enrichReactors = false
     )
     {
         Guild = guild;
@@ -118,6 +126,7 @@ public partial class ExportRequest
         ShouldUseHtmlSharedAssets = shouldUseHtmlSharedAssets;
         IsCompact = isCompact;
         ForceFullScan = forceFullScan;
+        EnrichReactors = enrichReactors;
 
         BaseOutputDirPath =
             Directory.Exists(outputPath) || Path.EndsInDirectorySeparator(outputPath)

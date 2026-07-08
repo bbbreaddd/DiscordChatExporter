@@ -262,12 +262,18 @@ public class ChannelExporter(DiscordClient discord)
 
                 if (request.MessageFilter.IsMatch(message))
                 {
-                    var enrichedMessage = await EnrichReactionsWithUsersAsync(
-                        discord,
-                        request.Channel.Id,
-                        message,
-                        cancellationToken
-                    );
+                    // Reactor lists cost one paginated request per unique emoji per message, so
+                    // they're only fetched when explicitly asked for (--enrich-reactors). A bulk
+                    // catch-up/rescrape leaves them off and keeps just emoji+count; the live watch
+                    // path records reactors from the gateway (MESSAGE_REACTION_ADD) for free.
+                    var enrichedMessage = request.EnrichReactors
+                        ? await EnrichReactionsWithUsersAsync(
+                            discord,
+                            request.Channel.Id,
+                            message,
+                            cancellationToken
+                        )
+                        : message;
 
                     await databaseStore.UpsertMessageAsync(
                         request.Channel.Id,

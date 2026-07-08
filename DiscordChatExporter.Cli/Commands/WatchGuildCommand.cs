@@ -76,15 +76,25 @@ public partial class WatchGuildCommand : DiscordCommandBase
     public bool RetryFailedMedia { get; set; }
 
     [CommandOption(
+        "enrich-reactors",
+        Description = "Fetch the full reactor list during catch-up/scan-missing channel exports "
+            + "(one paginated request per unique emoji per message). Off by default: live reactions "
+            + "already record reactors from the gateway, so this only affects historical backfill, "
+            + "where it can multiply the request count several-fold."
+    )]
+    public bool EnrichReactors { get; set; } = false;
+
+    [CommandOption(
         "catch-up-parallel",
         Description = "How many channel/thread exports (catch-up, scan-missing, or a debounced "
-            + "regular re-export) may run concurrently. Different channels/threads use "
-            + "independent Discord rate-limit buckets, so this is safe to raise well above 1 -- "
-            + "it does not increase pressure on any single channel's limit. Live messages, "
-            + "patches, deletes, and guild syncs are unaffected: they always run immediately on "
-            + "the main loop regardless of this setting, since they're already cheap/local."
+            + "regular re-export) may run concurrently. The message-history endpoint is rate "
+            + "limited per-channel independently (measured: ~5 burst then ~2 requests/s each), so "
+            + "raising this multiplies catch-up throughput up to Discord's global ~50 req/s cap. "
+            + "~10-12 is a good balance; much higher yields little until you hit the global limit. "
+            + "Live messages, patches, deletes, and guild syncs are unaffected: they always run "
+            + "immediately on the main loop regardless of this setting, since they're cheap/local."
     )]
-    public int CatchUpParallel { get; set; } = 6;
+    public int CatchUpParallel { get; set; } = 10;
 
     private readonly Dictionary<Snowflake, HashSet<Snowflake>> _knownPinnedIds = new();
 
@@ -100,6 +110,12 @@ public partial class WatchGuildCommand : DiscordCommandBase
     // existence check (and any resolve-and-upsert of a brand-new channel) after the first message
     // for a channel. Only ever touched from the single-threaded pump loop.
     private readonly HashSet<Snowflake> _knownChannelIds = new();
+
+    // Cached guild role catalog, used to resolve the role IDs in a live message's member block
+    // into full Role objects for the user row. Fetched once (one REST call per session), then
+    // invalidated whenever a guild sync runs -- role create/update/delete all funnel through
+    // EnqueueGuildSync. Only ever touched from the single-threaded pump loop.
+    private IReadOnlyDictionary<Snowflake, Role>? _guildRoles;
 
     public override async ValueTask ExecuteAsync(IConsole console)
     {
@@ -372,7 +388,24 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             try
                             {
                                 var message = Message.Parse(data);
-                                queue.EnqueueMessageUpsert(channelId, message);
+
+                                // The payload embeds the author's guild member block (nick, roles,
+                                // join date, ...) under "member" -- capture it so the author is
+                                // stored complete without a REST member fetch.
+                                Member? authorMember = null;
+                                if (
+                                    data.TryGetProperty("member", out var memberJson)
+                                    && memberJson.ValueKind == JsonValueKind.Object
+                                )
+                                {
+                                    authorMember = Member.ParseFromMessage(
+                                        memberJson,
+                                        message.Author,
+                                        GuildId
+                                    );
+                                }
+
+                                queue.EnqueueMessageUpsert(channelId, message, authorMember);
 
                                 lock (console)
                                     console.Output.WriteLine(
@@ -855,6 +888,24 @@ public partial class WatchGuildCommand : DiscordCommandBase
     // Ensures the channel row (and its guild) exist before a message's foreign key needs them.
     // Results are cached, so this costs at most one existence probe -- and, for a brand-new
     // channel/thread, one Discord fetch -- per channel per session.
+    // Lazily fetches (and caches) the guild role catalog for resolving live message authors' role
+    // IDs. Costs one REST call the first time, then nothing until a guild sync invalidates it.
+    // Only called from the single-threaded pump loop, so the null-check/assign needs no locking.
+    private async ValueTask<IReadOnlyDictionary<Snowflake, Role>> GetGuildRolesAsync(
+        CancellationToken cancellationToken
+    )
+    {
+        if (_guildRoles is null)
+        {
+            var map = new Dictionary<Snowflake, Role>();
+            await foreach (var role in Discord.GetGuildRolesAsync(GuildId, cancellationToken))
+                map[role.Id] = role;
+            _guildRoles = map;
+        }
+
+        return _guildRoles;
+    }
+
     private async ValueTask EnsureChannelExistsAsync(
         Snowflake channelId,
         SqliteExportStore store,
@@ -902,7 +953,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
             false,
             null,
             false,
-            forceFullScan: forceFullScan
+            forceFullScan: forceFullScan,
+            enrichReactors: EnrichReactors
         );
     }
 
@@ -939,10 +991,47 @@ public partial class WatchGuildCommand : DiscordCommandBase
             // the periodic [status] line reports throughput instead.
             await EnsureChannelExistsAsync(upsert.ChannelId, store, cancellationToken);
 
+            // Resolve the author's role IDs (from the gateway member block) into full Role objects
+            // for the user row -- everything else the author needs (nick, join date, ...) is already
+            // in the member block, so no REST member fetch is required.
+            IReadOnlyList<Role> authorRoles = Array.Empty<Role>();
+            if (upsert.AuthorMember is { } authorMember)
+            {
+                var roleMap = await GetGuildRolesAsync(cancellationToken);
+                authorRoles = authorMember
+                    .RoleIds.Select(roleMap.GetValueOrDefault)
+                    .Where(r => r is not null)
+                    .Select(r => r!)
+                    .OrderByDescending(r => r.Position)
+                    .ToArray();
+            }
+
+            var authorId = upsert.Message.Author.Id;
             foreach (var user in upsert.Message.GetReferencedUsers())
-                await store.UpsertUserAsync(user, null, Array.Empty<Role>(), cancellationToken);
+            {
+                // Only the author's member block rides along in the payload; mentioned/referenced
+                // users are upserted without member info (the store preserves any richer row a
+                // prior real sighting stored, rather than clobbering it -- see UpsertUserCoreAsync).
+                if (upsert.AuthorMember is not null && user.Id == authorId)
+                    await store.UpsertUserAsync(
+                        user,
+                        upsert.AuthorMember,
+                        authorRoles,
+                        cancellationToken
+                    );
+                else
+                    await store.UpsertUserAsync(user, null, Array.Empty<Role>(), cancellationToken);
+            }
 
             await store.UpsertMessageAsync(upsert.ChannelId, upsert.Message, cancellationToken);
+
+            // Advance the stored cursor from this live message so the debounced re-export finds
+            // nothing new and skips re-fetching recent messages just to re-enrich them over REST.
+            await store.AdvanceChannelCursorAsync(
+                upsert.ChannelId,
+                upsert.Message.Id,
+                cancellationToken
+            );
             await store.FlushAsync(cancellationToken);
             return;
         }
@@ -1041,6 +1130,9 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 );
             var (roleCount, emojiCount, stickerCount, scheduledEventCount) =
                 await SyncGuildCommand.SyncGuildAsync(Discord, store, GuildId, cancellationToken);
+            // Roles may have changed (create/update/delete all funnel through here) -- drop the
+            // cached catalog so the next live message resolves author roles against fresh data.
+            _guildRoles = null;
             lock (console)
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Synced guild catalog: {roleCount} roles, {emojiCount} emojis, {stickerCount} stickers, {scheduledEventCount} events."

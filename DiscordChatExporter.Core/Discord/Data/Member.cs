@@ -27,6 +27,47 @@ public partial record Member
 {
     public static Member CreateFallback(User user) => new(user, null, null, []);
 
+    // A MESSAGE_CREATE/MESSAGE_UPDATE gateway payload embeds the author's guild member object under
+    // "member", but WITHOUT the nested "user" (the user lives in the top-level "author" instead).
+    // This builds a Member from that block plus the already-parsed author, so the live watch path
+    // can capture nick/roles/joined_at/etc. straight from the event instead of a REST member fetch.
+    public static Member ParseFromMessage(JsonElement memberJson, User author, Snowflake guildId)
+    {
+        var displayName = memberJson.GetPropertyOrNull("nick")?.GetNonWhiteSpaceStringOrNull();
+
+        var roleIds =
+            memberJson
+                .GetPropertyOrNull("roles")
+                ?.EnumerateArray()
+                .Select(j => j.GetNonWhiteSpaceString())
+                .Select(Snowflake.Parse)
+                .ToArray()
+            ?? [];
+
+        var avatarUrl = memberJson
+            .GetPropertyOrNull("avatar")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => ImageCdn.GetMemberAvatarUrl(guildId, author.Id, h));
+
+        var joinedAt = memberJson.GetPropertyOrNull("joined_at")?.GetDateTimeOffsetOrNull();
+        var premiumSince = memberJson.GetPropertyOrNull("premium_since")?.GetDateTimeOffsetOrNull();
+        var communicationDisabledUntil = memberJson
+            .GetPropertyOrNull("communication_disabled_until")
+            ?.GetDateTimeOffsetOrNull();
+        var pending = memberJson.GetPropertyOrNull("pending")?.GetBooleanOrNull() ?? false;
+
+        return new Member(
+            author,
+            displayName,
+            avatarUrl,
+            roleIds,
+            joinedAt,
+            premiumSince,
+            communicationDisabledUntil,
+            pending
+        );
+    }
+
     public static Member Parse(JsonElement json, Snowflake? guildId = null)
     {
         var user = json.GetProperty("user").Pipe(User.Parse);

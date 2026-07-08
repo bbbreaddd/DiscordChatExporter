@@ -151,6 +151,16 @@ public abstract class ExportCommandBase : DiscordCommandBase
     public bool ForceFullScan { get; set; }
 
     [CommandOption(
+        "enrich-reactors",
+        Description = "Only applies to '-f Db'. Fetch the full list of users who reacted to each "
+            + "message (one paginated request per unique emoji per message). Off by default: on a "
+            + "bulk export this can multiply the total request count several-fold, and only emoji + "
+            + "count are stored otherwise. The live 'watchguild' path records reactors from the "
+            + "gateway for free regardless of this flag."
+    )]
+    public bool EnrichReactors { get; set; } = false;
+
+    [CommandOption(
         "dateformat",
         Description = "This option doesn't do anything. Kept for backwards compatibility."
     )]
@@ -571,7 +581,8 @@ public abstract class ExportCommandBase : DiscordCommandBase
                                             ShouldCacheAssetsOnly,
                                             shouldUseHtmlSharedAssets: ShouldUseHtmlSharedAssets,
                                             isCompact: IsCompact,
-                                            forceFullScan: ForceFullScan
+                                            forceFullScan: ForceFullScan,
+                                            enrichReactors: EnrichReactors
                                         );
 
                                         if (databaseStore is not null)

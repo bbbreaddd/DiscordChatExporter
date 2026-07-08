@@ -11,7 +11,14 @@ public abstract record QueueItem;
 // A message already fully materialized from a gateway payload (MESSAGE_CREATE), to be written
 // straight to the database with no Discord round-trip. Attempt tracks retry count so a
 // persistently failing upsert is eventually dropped instead of looping forever.
-public record UpsertMessageItem(Snowflake ChannelId, Message Message, int Attempt = 0) : QueueItem;
+// AuthorMember is the guild-member block Discord embeds in the MESSAGE_CREATE payload (nick, roles,
+// join date, ...) -- captured here so the author can be stored complete without a REST member fetch.
+public record UpsertMessageItem(
+    Snowflake ChannelId,
+    Message Message,
+    Member? AuthorMember = null,
+    int Attempt = 0
+) : QueueItem;
 
 public record PatchMessageItem(Snowflake ChannelId, Snowflake MessageId, string Reason) : QueueItem;
 
@@ -186,11 +193,15 @@ public class WatchGuildQueue
         }
     }
 
-    public void EnqueueMessageUpsert(Snowflake channelId, Message message)
+    public void EnqueueMessageUpsert(
+        Snowflake channelId,
+        Message message,
+        Member? authorMember = null
+    )
     {
         lock (_lock)
         {
-            _pendingMessages.Enqueue(new UpsertMessageItem(channelId, message));
+            _pendingMessages.Enqueue(new UpsertMessageItem(channelId, message, authorMember));
         }
     }
 

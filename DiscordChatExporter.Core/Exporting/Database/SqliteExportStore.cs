@@ -888,6 +888,44 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
+    // Advances a channel's stored last_message_id straight from a live gateway message, skipping
+    // the full export bookkeeping. The guard only ever moves the cursor FORWARD, so a duplicate or
+    // out-of-order delivery can't rewind it. Keeping the cursor current between debounced exports
+    // means the next debounced re-export's GetMessages(after=cursor) finds nothing new -- so it no
+    // longer re-fetches recent messages just to re-enrich their authors/reactors over REST. On a
+    // reconnect the gap is still backfilled correctly, because messages that arrived while
+    // disconnected have higher ids than this cursor and catch-up resumes from it.
+    public async ValueTask AdvanceChannelCursorAsync(
+        Snowflake channelId,
+        Snowflake messageId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                UPDATE channel
+                SET last_message_id = $messageId
+                WHERE id = $id
+                    AND (last_message_id IS NULL OR $messageId > last_message_id);
+                """
+            );
+            command.Parameters.AddWithValue("$messageId", ToDbId(messageId));
+            command.Parameters.AddWithValue("$id", ToDbId(channelId));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     public async ValueTask<Snowflake?> GetMaxMessageIdAsync(
         Snowflake channelId,
         CancellationToken cancellationToken = default
@@ -1026,7 +1064,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
         Member? member,
         IReadOnlyDictionary<Snowflake, Role> roles,
         CancellationToken cancellationToken = default
-    ) => UpsertUserCoreAsync(user.Id, DatabaseJson.MapUser(user, member, roles), cancellationToken);
+    ) =>
+        UpsertUserCoreAsync(
+            user.Id,
+            DatabaseJson.MapUser(user, member, roles),
+            member is not null,
+            cancellationToken
+        );
 
     // Used by the live-export path, which resolves roles off an ExportContext and passes the
     // whole Member through (rather than two loose nickname/avatar strings) so joined_at/
@@ -1036,11 +1080,24 @@ public sealed class SqliteExportStore : IAsyncDisposable
         Member? member,
         IReadOnlyList<Role> roles,
         CancellationToken cancellationToken = default
-    ) => UpsertUserCoreAsync(user.Id, DatabaseJson.MapUser(user, member, roles), cancellationToken);
+    ) =>
+        UpsertUserCoreAsync(
+            user.Id,
+            DatabaseJson.MapUser(user, member, roles),
+            member is not null,
+            cancellationToken
+        );
 
+    // hasMemberInfo says whether the caller actually had this user's guild-member data (nick,
+    // roles, join date, ...). When false (e.g. the live fast-path upserting a *mentioned* user it
+    // only saw a bare user object for), the member-derived columns are LEFT AS-IS on an existing
+    // row instead of being clobbered with empty/null -- otherwise a mention would wipe out the
+    // richer row a prior real member sighting had stored. On a brand-new row there's nothing to
+    // preserve, so the (empty) values are inserted as-is either way.
     private async ValueTask UpsertUserCoreAsync(
         Snowflake userId,
         UserDto dto,
+        bool hasMemberInfo,
         CancellationToken cancellationToken
     )
     {
@@ -1078,19 +1135,22 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     $bannerUrl, $accentColor
                 )
                 ON CONFLICT(id) DO UPDATE SET
+                    -- Always-current user-level fields.
                     is_bot = excluded.is_bot,
                     discriminator = excluded.discriminator,
                     name = excluded.name,
-                    display_name = excluded.display_name,
-                    color = excluded.color,
-                    avatar_url = excluded.avatar_url,
-                    roles_json = excluded.roles_json,
-                    joined_at = excluded.joined_at,
-                    premium_since = excluded.premium_since,
-                    communication_disabled_until = excluded.communication_disabled_until,
-                    pending = excluded.pending,
                     banner_url = excluded.banner_url,
-                    accent_color = excluded.accent_color;
+                    accent_color = excluded.accent_color,
+                    -- Member-derived fields: only overwrite when the caller actually had member
+                    -- info; otherwise keep whatever a previous real sighting stored.
+                    display_name = CASE WHEN $hasMember = 1 THEN excluded.display_name ELSE "user".display_name END,
+                    color = CASE WHEN $hasMember = 1 THEN excluded.color ELSE "user".color END,
+                    avatar_url = CASE WHEN $hasMember = 1 THEN excluded.avatar_url ELSE "user".avatar_url END,
+                    roles_json = CASE WHEN $hasMember = 1 THEN excluded.roles_json ELSE "user".roles_json END,
+                    joined_at = CASE WHEN $hasMember = 1 THEN excluded.joined_at ELSE "user".joined_at END,
+                    premium_since = CASE WHEN $hasMember = 1 THEN excluded.premium_since ELSE "user".premium_since END,
+                    communication_disabled_until = CASE WHEN $hasMember = 1 THEN excluded.communication_disabled_until ELSE "user".communication_disabled_until END,
+                    pending = CASE WHEN $hasMember = 1 THEN excluded.pending ELSE "user".pending END;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(userId));
@@ -1116,6 +1176,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$pending", dto.Pending ? 1 : 0);
             command.Parameters.AddWithValue("$bannerUrl", OrNull(dto.BannerUrl));
             command.Parameters.AddWithValue("$accentColor", OrNull(dto.AccentColor));
+            command.Parameters.AddWithValue("$hasMember", hasMemberInfo ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
             await InsertMediaAsync(avatarMedia, cancellationToken);
