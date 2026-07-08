@@ -117,6 +117,61 @@ public partial class WatchGuildCommand : DiscordCommandBase
     // EnqueueGuildSync. Only ever touched from the single-threaded pump loop.
     private IReadOnlyDictionary<Snowflake, Role>? _guildRoles;
 
+    // Channels the config excludes from backup. Seeded from the explicit id list; channels matched
+    // by category / nsfw / thread rules are added as catch-up classifies them, so their subsequent
+    // live events are dropped too. Read from the dispatch thread and written from the background
+    // catch-up task, so all access goes through the lock.
+    private readonly HashSet<Snowflake> _excludedChannelIds = new();
+    private readonly object _excludedLock = new();
+
+    private void MarkChannelExcluded(Snowflake channelId)
+    {
+        lock (_excludedLock)
+            _excludedChannelIds.Add(channelId);
+    }
+
+    private bool IsExcludedChannelId(Snowflake channelId)
+    {
+        lock (_excludedLock)
+            return _excludedChannelIds.Contains(channelId);
+    }
+
+    // Classifies a freshly-listed channel against the config's exclusion rules (id / category /
+    // nsfw / thread). Pure -- reads only the immutable settings.
+    private bool IsChannelExcluded(Channel channel)
+    {
+        if (_settings.ExcludeChannels.Contains(channel.Id))
+            return true;
+        if (channel.Parent is { } parent && _settings.ExcludeCategories.Contains(parent.Id))
+            return true;
+        if (_settings.ExcludeNsfw && channel.IsNsfw)
+            return true;
+        if (_settings.ExcludeThreads && channel.IsThread)
+            return true;
+        return false;
+    }
+
+    // When set (the `watch --config` path), these replace the CLI options as the source of the
+    // watch's behavior. Null on the plain `watchguild` CLI path, where BuildSettingsFromOptions()
+    // maps the options instead. GuildId/OutputPath/token are always taken from the command itself.
+    internal WatchSettings? SettingsOverride { get; set; }
+
+    private WatchSettings _settings = null!;
+
+    private WatchSettings BuildSettingsFromOptions() =>
+        new()
+        {
+            DownloadMedia = ShouldDownloadAssets,
+            MediaDir = AssetsDirPath,
+            RetryFailedMedia = RetryFailedMedia,
+            CatchUp = CatchUp,
+            ScanMissing = ScanMissing,
+            CatchUpParallel = CatchUpParallel,
+            EnrichReactors = EnrichReactors,
+            // Data toggles / exclusions keep their permissive defaults on the CLI path -- those
+            // knobs are only surfaced through the YAML config, not as watchguild flags.
+        };
+
     public override async ValueTask ExecuteAsync(IConsole console)
     {
         await base.ExecuteAsync(console);
@@ -124,8 +179,18 @@ public partial class WatchGuildCommand : DiscordCommandBase
         if (ExportFormat != ExportFormat.Db)
             throw new CommandException("Option --format only supports 'Db' for watchguild.");
 
-        if (!string.IsNullOrWhiteSpace(AssetsDirPath) && !ShouldDownloadAssets)
+        // CLI-only validation: the config path validates its own media block on load.
+        if (
+            SettingsOverride is null
+            && !string.IsNullOrWhiteSpace(AssetsDirPath)
+            && !ShouldDownloadAssets
+        )
             throw new CommandException("Option --media-dir cannot be used without --media.");
+
+        _settings = SettingsOverride ?? BuildSettingsFromOptions();
+
+        foreach (var excludedId in _settings.ExcludeChannels)
+            MarkChannelExcluded(excludedId);
 
         // Single-instance guard, scoped per-database. Two watchers (or a watcher plus a separate
         // `export --format Db` run) writing to the same file would each open a writer connection;
@@ -157,16 +222,28 @@ public partial class WatchGuildCommand : DiscordCommandBase
         var cancellationToken = console.RegisterCancellationHandlerWithSignals();
 
         var firstToken = Discord.Tokens[0];
-        var queue = new WatchGuildQueue(maxConcurrentExports: Math.Max(1, CatchUpParallel));
+        var queue = new WatchGuildQueue(
+            maxConcurrentExports: Math.Max(1, _settings.CatchUpParallel)
+        );
 
         await console.Output.WriteLineAsync(
             $"Starting watchguild for guild {GuildId} into '{OutputPath}'..."
         );
 
+        var storeDataOptions = new StoreDataOptions
+        {
+            MediaAssetKinds = _settings.MediaAssets.ToHashSet(),
+            CaptureReactions = _settings.CaptureReactions,
+            CaptureEmbeds = _settings.CaptureEmbeds,
+            CaptureStickers = _settings.CaptureStickers,
+            CapturePolls = _settings.CapturePolls,
+        };
+
         await using var store = await SqliteExportStore.OpenAsync(
             OutputPath,
-            ShouldDownloadAssets ? AssetsDirPath ?? $"{OutputPath}_Files" : null,
-            RetryFailedMedia,
+            _settings.DownloadMedia ? _settings.MediaDir ?? $"{OutputPath}_Files" : null,
+            _settings.RetryFailedMedia,
+            storeDataOptions,
             cancellationToken
         );
 
@@ -233,7 +310,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 if (eventType == "READY")
                 {
                     var skipRescan = false;
-                    if (CatchUp || ScanMissing)
+                    if (_settings.CatchUp || _settings.ScanMissing)
                     {
                         lock (_catchUpLock)
                         {
@@ -253,7 +330,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         }
                     }
 
-                    if (CatchUp && !skipRescan)
+                    if (_settings.CatchUp && !skipRescan)
                     {
                         _ = Task.Run(
                             async () =>
@@ -272,24 +349,34 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                         if (!ch.IsCategory && ch.Kind != ChannelKind.GuildForum)
                                             channels.Add(ch);
                                     }
-                                    await foreach (
-                                        var th in Discord.GetGuildThreadsAsync(
-                                            GuildId,
-                                            includeArchived: true,
-                                            cancellationToken: cts.Token
-                                        )
-                                    )
+                                    if (_settings.CaptureThreads)
                                     {
-                                        if (th.Kind != ChannelKind.GuildForum)
-                                            channels.Add(th);
+                                        await foreach (
+                                            var th in Discord.GetGuildThreadsAsync(
+                                                GuildId,
+                                                includeArchived: true,
+                                                cancellationToken: cts.Token
+                                            )
+                                        )
+                                        {
+                                            if (th.Kind != ChannelKind.GuildForum)
+                                                channels.Add(th);
+                                        }
                                     }
+                                    var queued = 0;
                                     foreach (var ch in channels)
                                     {
+                                        if (IsChannelExcluded(ch))
+                                        {
+                                            MarkChannelExcluded(ch.Id);
+                                            continue;
+                                        }
                                         queue.EnqueueChannelExport(ch.Id, isCatchup: true);
+                                        queued++;
                                     }
                                     lock (console)
                                         console.Output.WriteLine(
-                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued {channels.Count} channels/threads for export."
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued {queued} channels/threads for export ({channels.Count - queued} excluded)."
                                         );
                                 }
                                 catch (Exception ex)
@@ -304,7 +391,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         );
                     }
 
-                    if (ScanMissing && !skipRescan)
+                    if (_settings.ScanMissing && !skipRescan)
                     {
                         _ = Task.Run(
                             async () =>
@@ -323,24 +410,34 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                         if (!ch.IsCategory && ch.Kind != ChannelKind.GuildForum)
                                             channels.Add(ch);
                                     }
-                                    await foreach (
-                                        var th in Discord.GetGuildThreadsAsync(
-                                            GuildId,
-                                            includeArchived: true,
-                                            cancellationToken: cts.Token
-                                        )
-                                    )
+                                    if (_settings.CaptureThreads)
                                     {
-                                        if (th.Kind != ChannelKind.GuildForum)
-                                            channels.Add(th);
+                                        await foreach (
+                                            var th in Discord.GetGuildThreadsAsync(
+                                                GuildId,
+                                                includeArchived: true,
+                                                cancellationToken: cts.Token
+                                            )
+                                        )
+                                        {
+                                            if (th.Kind != ChannelKind.GuildForum)
+                                                channels.Add(th);
+                                        }
                                     }
+                                    var queued = 0;
                                     foreach (var ch in channels)
                                     {
+                                        if (IsChannelExcluded(ch))
+                                        {
+                                            MarkChannelExcluded(ch.Id);
+                                            continue;
+                                        }
                                         queue.EnqueueChannelExport(ch.Id, forceFullScan: true);
+                                        queued++;
                                     }
                                     lock (console)
                                         console.Output.WriteLine(
-                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scan-missing] Queued {channels.Count} channels/threads for full rescan."
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scan-missing] Queued {queued} channels/threads for full rescan ({channels.Count - queued} excluded)."
                                         );
                                 }
                                 catch (Exception ex)
@@ -371,6 +468,18 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         return ValueTask.CompletedTask;
                 }
 
+                // Drop events for excluded channels uniformly. Covers every channel-scoped event
+                // that carries "channel_id" (messages, reactions, pins, poll votes, deletes);
+                // channel/thread lifecycle events use "id" and are backstopped at export time.
+                if (
+                    data.TryGetProperty("channel_id", out var scopedChannelProp)
+                    && scopedChannelProp.ValueKind == JsonValueKind.String
+                    && IsExcludedChannelId(Snowflake.Parse(scopedChannelProp.GetString()!))
+                )
+                {
+                    return ValueTask.CompletedTask;
+                }
+
                 switch (eventType)
                 {
                     case "MESSAGE_CREATE":
@@ -394,7 +503,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                 // stored complete without a REST member fetch.
                                 Member? authorMember = null;
                                 if (
-                                    data.TryGetProperty("member", out var memberJson)
+                                    _settings.CaptureMembers
+                                    && data.TryGetProperty("member", out var memberJson)
                                     && memberJson.ValueKind == JsonValueKind.Object
                                 )
                                 {
@@ -472,7 +582,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     case "GUILD_ROLE_CREATE":
                     case "GUILD_ROLE_UPDATE":
                     case "GUILD_ROLE_DELETE":
-                        queue.EnqueueGuildSync(eventType);
+                        if (_settings.SyncGuildCatalog)
+                            queue.EnqueueGuildSync(eventType);
                         break;
 
                     case "CHANNEL_DELETE":
@@ -536,6 +647,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             var messageId = Snowflake.Parse(
                                 data.GetProperty("message_id").GetString()!
                             );
+                            if (!_settings.CapturePolls)
+                                break;
                             var answerId = data.GetProperty("answer_id").GetInt32();
                             var userId = Snowflake.Parse(data.GetProperty("user_id").GetString()!);
                             queue.EnqueuePollVote(
@@ -551,6 +664,8 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
                     case "CHANNEL_PINS_UPDATE":
                         {
+                            if (!_settings.CapturePins)
+                                break;
                             var channelId = Snowflake.Parse(
                                 data.GetProperty("channel_id").GetString()!
                             );
@@ -611,7 +726,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
                     case "THREAD_CREATE":
                         {
+                            if (!_settings.CaptureThreads)
+                                break;
                             var threadId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            if (IsExcludedChannelId(threadId))
+                                break;
                             var timestamp =
                                 data.TryGetProperty("thread_metadata", out var meta)
                                 && meta.TryGetProperty("create_timestamp", out var ct)
@@ -623,7 +742,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
                     case "THREAD_UPDATE":
                         {
+                            if (!_settings.CaptureThreads)
+                                break;
                             var channelId = Snowflake.Parse(data.GetProperty("id").GetString()!);
+                            if (IsExcludedChannelId(channelId))
+                                break;
                             queue.EnqueueChannelExport(channelId, null);
                         }
                         break;
@@ -954,7 +1077,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
             null,
             false,
             forceFullScan: forceFullScan,
-            enrichReactors: EnrichReactors
+            enrichReactors: _settings.EnrichReactors
         );
     }
 
@@ -1140,6 +1263,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
         }
         else if (item is ExportChannelItem export)
         {
+            // Backstop for excluded channels that reached the queue via an id-based lifecycle
+            // event (which the channel_id dispatch guard doesn't cover).
+            if (IsExcludedChannelId(export.ChannelId))
+                return;
+
             lock (console)
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Exporting channel {export.ChannelId} (IsCatchup={export.IsCatchup}, ForceFullScan={export.ForceFullScan})..."

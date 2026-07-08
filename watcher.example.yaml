@@ -1,0 +1,66 @@
+# Example config for the `watch` command:
+#   DiscordChatExporter.Cli watch --config watcher.yaml
+#
+# `defaults:` are inherited by every server; each server entry overrides any subset of them
+# (merged field-by-field). Only `token`/`token-file` and, per server, `name` + `id` + `output`
+# are required -- everything else has a sensible default, so a minimal config is just those.
+#
+# The config may list several servers, but one is watched per run: the single `enabled` one, or
+# the one chosen with `--server <name|id>`. Run one process per server to watch several at once.
+
+# One of token / token-file is required. token-file may hold multiple tokens (one per line) used
+# as fallbacks for one another. (In Docker you can instead set the DISCORD_TOKEN env var.)
+token-file: /path/to/tokens.txt
+# token: "your-token-here"
+
+# Respect Discord's advisory rate limits (recommended). false = only back off on hard 429s.
+respect-rate-limits: true
+
+defaults:
+  media:
+    enabled: true
+    # %SERVER% / %NAME% -> server name, %ID% -> server id (handy for a shared default path).
+    dir: /path/to/media/%SERVER%
+    # Which asset kinds to download. Drop any you don't want.
+    assets: [attachments, avatars, emojis, stickers, guild-icons, guild-banners, role-icons, user-banners]
+
+  data:
+    reactions: true       # store each message's reactions + counts (from the payload, free)
+    reactors: false       # ALSO fetch the full reactor list per emoji during catch-up/rescan
+                          # (expensive: one paginated request per emoji per message). Live
+                          # reactions are recorded from the gateway regardless.
+    embeds: true
+    stickers: true
+    polls: true
+    threads: true         # enumerate & watch threads (and thread creates)
+    pins: true            # track pin changes
+    members: true         # capture author guild-member info (nick/roles/join date) from the gateway
+    guild-catalog: true   # periodically sync roles / emoji / stickers / scheduled events
+
+  behavior:
+    catch-up: true            # on connect, backfill every channel from its stored cursor
+    scan-missing: false       # on connect, full re-scan of every channel (heavier than catch-up)
+    catch-up-parallel: 10     # channels exported concurrently (per-channel rate limits are independent)
+    retry-failed: false       # retry media URLs previously recorded as permanently gone (404/410)
+
+  exclude:
+    channels: []          # channel ids to skip entirely
+    categories: []        # category ids -> skips all channels under them
+    nsfw: false           # skip channels flagged NSFW
+    threads: false        # skip all threads
+
+servers:
+  - name: My Server
+    id: 000000000000000000            # your server (guild) id
+    enabled: true
+    output: /path/to/backups/my-server.db
+    # Per-server overrides of the defaults above, e.g.:
+    # media:
+    #   dir: /path/to/media/my-server
+    # exclude:
+    #   channels: [111111111111111111]   # e.g. a staff channel
+
+  # - name: Another Server
+  #   id: 222222222222222222
+  #   enabled: false
+  #   output: /path/to/backups/another-server.db

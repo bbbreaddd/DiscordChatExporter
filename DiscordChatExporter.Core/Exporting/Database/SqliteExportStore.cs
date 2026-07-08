@@ -30,6 +30,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private readonly string? _mediaDirPath;
     private readonly ExportAssetDownloader? _mediaDownloader;
     private readonly bool _retryFailedMedia;
+    private readonly StoreDataOptions _dataOptions;
 
     // All public members serialize through this so the single underlying connection (and its
     // at-most-one open transaction) is never touched from two threads at once -- callers may
@@ -42,12 +43,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private SqliteExportStore(
         SqliteConnection connection,
         string? mediaDirPath,
-        bool retryFailedMedia
+        bool retryFailedMedia,
+        StoreDataOptions? dataOptions
     )
     {
         _connection = connection;
         _mediaDirPath = mediaDirPath;
         _retryFailedMedia = retryFailedMedia;
+        _dataOptions = dataOptions ?? StoreDataOptions.Default;
         _mediaDownloader = mediaDirPath is not null
             ? new ExportAssetDownloader(mediaDirPath, reuse: true)
             : null;
@@ -56,20 +59,29 @@ public sealed class SqliteExportStore : IAsyncDisposable
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         CancellationToken cancellationToken = default
-    ) => await OpenAsync(databaseFilePath, null, false, cancellationToken);
+    ) => await OpenAsync(databaseFilePath, null, false, null, cancellationToken);
 
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         string? mediaDirPath,
         CancellationToken cancellationToken
-    ) => await OpenAsync(databaseFilePath, mediaDirPath, false, cancellationToken);
+    ) => await OpenAsync(databaseFilePath, mediaDirPath, false, null, cancellationToken);
 
-    // retryFailedMedia forces re-attempting media URLs already recorded in the
-    // media_download_failure ledger (see Schema.V10), instead of skipping them.
     public static async Task<SqliteExportStore> OpenAsync(
         string databaseFilePath,
         string? mediaDirPath,
         bool retryFailedMedia,
+        CancellationToken cancellationToken
+    ) => await OpenAsync(databaseFilePath, mediaDirPath, retryFailedMedia, null, cancellationToken);
+
+    // retryFailedMedia forces re-attempting media URLs already recorded in the
+    // media_download_failure ledger (see Schema.V10), instead of skipping them. dataOptions gates
+    // which media kinds and message sub-parts are captured (null = capture everything).
+    public static async Task<SqliteExportStore> OpenAsync(
+        string databaseFilePath,
+        string? mediaDirPath,
+        bool retryFailedMedia,
+        StoreDataOptions? dataOptions,
         CancellationToken cancellationToken
     )
     {
@@ -96,7 +108,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await pragmas.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var store = new SqliteExportStore(connection, mediaDirPath, retryFailedMedia);
+        var store = new SqliteExportStore(connection, mediaDirPath, retryFailedMedia, dataOptions);
         await store.MigrateAsync(cancellationToken);
 
         return store;
@@ -287,6 +299,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
     )
     {
         if (_mediaDownloader is null || _mediaDirPath is null || !IsDiscordMediaUrl(sourceUrl))
+            return null;
+
+        // Per-asset-kind gating from the watcher config (e.g. capture attachments but not emojis).
+        if (!_dataOptions.AllowsMediaKind(assetKind))
             return null;
 
         if (
@@ -1302,14 +1318,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
         var messageIdDb = ToDbId(message.Id);
 
         var embedsJson =
-            message.Embeds.Count > 0
+            _dataOptions.CaptureEmbeds && message.Embeds.Count > 0
                 ? DatabaseJson.SerializeEmbeds(
                     message.Embeds.Select(DatabaseJson.MapEmbed).ToArray()
                 )
                 : null;
 
         var stickersJson =
-            message.Stickers.Count > 0
+            _dataOptions.CaptureStickers && message.Stickers.Count > 0
                 ? DatabaseJson.SerializeStickers(
                     message.Stickers.Select(DatabaseJson.MapSticker).ToArray()
                 )
@@ -1319,12 +1335,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
         var inlineEmojisJson =
             inlineEmojis.Count > 0 ? DatabaseJson.SerializeInlineEmojis(inlineEmojis) : null;
 
-        var pollJson = message.Poll is { } poll
-            ? JsonSerializer.Serialize(
-                DatabaseJson.MapPoll(poll),
-                DatabaseJsonContext.Default.PollDto
-            )
-            : null;
+        var pollJson =
+            _dataOptions.CapturePolls && message.Poll is { } poll
+                ? JsonSerializer.Serialize(
+                    DatabaseJson.MapPoll(poll),
+                    DatabaseJsonContext.Default.PollDto
+                )
+                : null;
 
         var componentsJson =
             message.Components.Count > 0
@@ -1468,7 +1485,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
             await deleteReactions.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        foreach (var reaction in message.Reactions)
+        // The DELETE above always runs (clears stale rows); the insert is skipped when reactions
+        // are disabled, so the message keeps no reaction rows at all.
+        var reactions = _dataOptions.CaptureReactions ? message.Reactions : [];
+        foreach (var reaction in reactions)
         {
             await using var insertReaction = CreateCommand(
                 """

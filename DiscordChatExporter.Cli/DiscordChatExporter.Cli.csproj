@@ -13,6 +13,7 @@
     <PackageReference Include="Gress" />
     <PackageReference Include="PowerKit" />
     <PackageReference Include="Spectre.Console" />
+    <PackageReference Include="YamlDotNet" />
   </ItemGroup>
 
   <ItemGroup>
