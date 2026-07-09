@@ -1879,7 +1879,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
-    // A recorded window of channel history that was never captured live (see Schema.V16).
+    // A recorded window of channel history that was never captured live (see Schema.V15).
     public sealed record MessageGap(
         long Id,
         Snowflake ChannelId,

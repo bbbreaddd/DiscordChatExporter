@@ -131,6 +131,11 @@ public partial class FillGapsCommand : DiscordCommandBase
                 // rescan. The message cursor (last_message_id) is never regressed by the export.
                 var state = await store.GetChannelStateAsync(gap.ChannelId, cancellationToken);
 
+                // The gap range (after, before] is inclusive of before_message_id, but Discord's
+                // `before` query param is exclusive -- fetch with before+1 so that boundary message
+                // isn't silently dropped.
+                var beforeInclusive = new Snowflake(gap.BeforeMessageId.Value + 1);
+
                 var request = new ExportRequest(
                     guild,
                     channel,
@@ -138,7 +143,7 @@ public partial class FillGapsCommand : DiscordCommandBase
                     null,
                     ExportFormat.Db,
                     gap.AfterMessageId,
-                    gap.BeforeMessageId,
+                    beforeInclusive,
                     PartitionLimit.Null,
                     MessageFilter.Null,
                     false,
@@ -164,6 +169,15 @@ public partial class FillGapsCommand : DiscordCommandBase
                     gap.ChannelId,
                     state?.LastExportAfter,
                     state?.LastExportBefore,
+                    cancellationToken
+                );
+                // Advance the cursor to the range's upper bound even when the fetch came back empty,
+                // so a channel whose last_message_id points at a deleted/unretrievable message
+                // (perpetually-empty range) isn't re-detected as a gap on every reconnect. Monotonic
+                // -- AdvanceChannelCursorAsync never regresses a cursor that live capture moved past.
+                await store.AdvanceChannelCursorAsync(
+                    gap.ChannelId,
+                    gap.BeforeMessageId,
                     cancellationToken
                 );
                 await store.MarkGapFilledAsync(gap.Id, cancellationToken);

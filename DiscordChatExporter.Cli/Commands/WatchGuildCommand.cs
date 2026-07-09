@@ -563,20 +563,107 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                                 channels.Add(th);
                                         }
                                     }
-                                    var queued = 0;
+                                    // Snapshot every channel's stored cursor once, then record a
+                                    // durable gap for the (cursor, liveLast] backlog that piled up
+                                    // while the watcher was offline. Recording this BEFORE any
+                                    // backfill runs -- and keying the backfill off the snapshotted
+                                    // gap rather than the channel's live-advanced last_message_id --
+                                    // is what makes catch-up interruption-safe: a live message can
+                                    // shove the cursor past history that was never backfilled, so a
+                                    // cursor-resuming catch-up would skip that history forever. The
+                                    // gap row is the source of truth; an interrupted run just leaves
+                                    // it unfilled to retry, never a silent hole.
+                                    var storedCursors = await store.GetChannelLastMessageIdsAsync(
+                                        GuildId,
+                                        cts.Token
+                                    );
+                                    // Lazily upserted (once, only if there's a gap to record) so the
+                                    // channel rows below satisfy their guild_id foreign key on a
+                                    // fresh database where the guild-catalog sync hasn't run yet.
+                                    Guild? guildRow = null;
+                                    var recorded = 0;
                                     foreach (var ch in channels)
                                     {
+                                        // Already excluded -- either by a config rule, or marked
+                                        // this session because a prior backfill found it unreadable
+                                        // (a forbidden/deleted channel). Skipping here stops such a
+                                        // channel from being re-recorded and re-probed on every
+                                        // reconnect within the session.
+                                        if (IsExcludedChannelId(ch.Id))
+                                            continue;
                                         if (IsChannelExcluded(ch))
                                         {
                                             MarkChannelExcluded(ch.Id);
                                             continue;
                                         }
-                                        queue.EnqueueChannelExport(ch.Id, isCatchup: true);
+                                        // No messages ever -> nothing to catch up.
+                                        if (ch.LastMessageId is not { } liveLast)
+                                            continue;
+                                        var hasCursor = storedCursors.TryGetValue(
+                                            ch.Id,
+                                            out var cursor
+                                        );
+                                        // Already level with the live tip -> no backlog.
+                                        if (hasCursor && !(cursor < liveLast))
+                                            continue;
+                                        // Ensure the guild + channel rows exist before recording the
+                                        // gap. GetUnfilledGapsAsync filters by guild via a JOIN on
+                                        // the channel table, so a gap whose channel row hasn't been
+                                        // created yet (a fresh DB, or the startup guild-catalog sync
+                                        // still racing on the pump) would be silently invisible to
+                                        // the enqueue below -- catch-up would record gaps and back
+                                        // up nothing. The guild row is upserted first to satisfy the
+                                        // channel's guild_id foreign key. Both are idempotent and
+                                        // also capture metadata we need regardless.
+                                        if (guildRow is null)
+                                        {
+                                            guildRow = await Discord.GetGuildAsync(
+                                                GuildId,
+                                                cts.Token
+                                            );
+                                            await store.UpsertGuildAsync(guildRow, cts.Token);
+                                        }
+                                        await store.UpsertChannelAsync(ch, cts.Token);
+                                        // Never-scanned channels have no lower bound, so backfill
+                                        // from the beginning (after = 0 fetches full history).
+                                        var after = hasCursor ? cursor : Snowflake.Zero;
+                                        await store.RecordMessageGapAsync(
+                                            ch.Id,
+                                            after,
+                                            liveLast,
+                                            cts.Token
+                                        );
+                                        recorded++;
+                                    }
+                                    await store.FlushAsync(cts.Token);
+
+                                    // Enqueue a bounded backfill for every unfilled gap -- the ones
+                                    // just recorded plus any a previously interrupted catch-up left
+                                    // behind. Each runs on the shared export concurrency pool and
+                                    // marks its gap filled only on full success.
+                                    var gaps = await store.GetUnfilledGapsAsync(GuildId, cts.Token);
+                                    var queued = 0;
+                                    foreach (var gap in gaps)
+                                    {
+                                        if (IsExcludedChannelId(gap.ChannelId))
+                                        {
+                                            // Leftover gap for a now-excluded channel -- resolve it
+                                            // instead of leaving it to be re-read (and skipped) on
+                                            // every run forever.
+                                            await store.MarkGapFilledAsync(gap.Id, cts.Token);
+                                            continue;
+                                        }
+                                        queue.EnqueueGapBackfill(
+                                            gap.Id,
+                                            gap.ChannelId,
+                                            gap.AfterMessageId,
+                                            gap.BeforeMessageId
+                                        );
                                         queued++;
                                     }
                                     lock (console)
                                         console.Output.WriteLine(
-                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued {queued} channels/threads for export ({channels.Count - queued} excluded)."
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Recorded {recorded} new backlog gap(s); queued {queued} gap backfill(s) (includes any left by a prior interrupted run)."
                                         );
                                 }
                                 catch (Exception ex)
@@ -1094,6 +1181,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     console.Output.WriteLine(
                         $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [status] queue status: "
                             + $"messages={queue.PendingMessagesCount}, channels={queue.PendingChannelsCount}, "
+                            + $"gapBackfills={queue.PendingGapBackfillsCount}, "
                             + $"inFlightExports={queue.InFlightExportsCount}, patches={queue.PendingPatchesCount}, "
                             + $"pollVotes={queue.PendingPollVotesCount}, "
                             + $"deleteChannels={queue.PendingDeleteChannelsCount}, deleteMessages={queue.PendingDeleteMessagesCount}, "
@@ -1106,7 +1194,10 @@ public partial class WatchGuildCommand : DiscordCommandBase
             inFlightExportTasks.RemoveAll(t => t.IsCompleted);
 
             var item = queue.TryDequeue();
-            if (item is ExportChannelItem)
+            // Gap backfills are bounded channel exports and hold an export concurrency slot, so
+            // they run on the same background pool as ExportChannelItem rather than blocking the
+            // pump (which must stay free for the latency-critical live-message path).
+            if (item is ExportChannelItem or GapBackfillItem)
             {
                 inFlightExportTasks.Add(
                     Task.Run(
@@ -1523,6 +1614,112 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Channel {export.ChannelId} is empty or has no messages in the specified range."
                     );
             }
+        }
+        else if (item is GapBackfillItem gap)
+        {
+            if (IsExcludedChannelId(gap.ChannelId))
+            {
+                // Channel got excluded after this gap was queued (e.g. an earlier overlapping gap's
+                // fill found it forbidden and marked it excluded). Resolve the gap rather than
+                // leaving it unfilled forever -- an excluded channel isn't being backed up, so its
+                // backlog is moot; if access is later restored, a fresh gap is recorded from the
+                // unchanged cursor.
+                await store.MarkGapFilledAsync(gap.GapId, cancellationToken);
+                await store.FlushAsync(cancellationToken);
+                return;
+            }
+
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Backfilling gap in channel {gap.ChannelId} ({gap.AfterMessageId} .. {gap.BeforeMessageId})..."
+                );
+
+            // The channel may have been deleted since the gap was recorded -- resolve it so a
+            // stale gap for a gone channel doesn't linger forever.
+            var channel = await Discord.TryGetChannelAsync(gap.ChannelId, cancellationToken);
+            if (channel is null)
+            {
+                // Forbidden or deleted (transient/rate-limit failures are already retried inside
+                // the client, so a null here is effectively permanent for this session). Exclude
+                // it so the next reconnect's gap recording skips it instead of re-probing every
+                // time; a process restart re-evaluates it once, in case access was since granted.
+                MarkChannelExcluded(gap.ChannelId);
+                await store.MarkGapFilledAsync(gap.GapId, cancellationToken);
+                await store.FlushAsync(cancellationToken);
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Gap channel {gap.ChannelId} is unreadable (forbidden/deleted) -- marked filled and excluded for this session."
+                    );
+                return;
+            }
+
+            var guild = await Discord.GetGuildAsync(channel.GuildId, cancellationToken);
+
+            // Snapshot the channel's export window so the bounded backfill doesn't leave its
+            // narrow last_export_after/before behind and trick a later debounced re-export into a
+            // full rescan. The message cursor (last_message_id) is never regressed by the export
+            // -- maxMessageId starts at the stored cursor and only advances.
+            var state = await store.GetChannelStateAsync(gap.ChannelId, cancellationToken);
+
+            // A gap's range is (after, before] -- inclusive of before_message_id, which is the
+            // channel's last message at record time (the newest downtime message, exactly what must
+            // be captured). Discord's `before` query param is EXCLUSIVE, so fetch with before+1 to
+            // include that boundary message; otherwise it is silently dropped every time.
+            var beforeInclusive = new Snowflake(gap.BeforeMessageId.Value + 1);
+
+            var req = new ExportRequest(
+                guild,
+                channel,
+                OutputPath,
+                null,
+                ExportFormat.Db,
+                gap.AfterMessageId,
+                beforeInclusive,
+                PartitionLimit.Null,
+                MessageFilter.Null,
+                false,
+                true,
+                false,
+                false,
+                null,
+                false,
+                enrichReactors: _settings.EnrichReactors
+            );
+            var exporter = new ChannelExporter(Discord);
+            try
+            {
+                await exporter.ExportChannelAsync(req, store, null, cancellationToken);
+            }
+            catch (ChannelEmptyException)
+            {
+                // The range turned out empty (e.g. every message in it was deleted on Discord).
+                // Nothing to backfill -- still count the gap resolved.
+            }
+
+            await store.SetChannelExportWindowAsync(
+                gap.ChannelId,
+                state?.LastExportAfter,
+                state?.LastExportBefore,
+                cancellationToken
+            );
+            // Advance the cursor to the range's upper bound even when the fetch came back empty.
+            // Some channels report a last_message_id pointing at a deleted/unretrievable message,
+            // so (after, before] is perpetually empty and the cursor -- left at maxMessageId --
+            // would never reach `before`, re-recording the identical gap on every reconnect.
+            // Bumping to `before` (monotonic; AdvanceChannelCursorAsync never regresses) closes the
+            // gap for good and matches Discord's own notion of the channel's tail.
+            await store.AdvanceChannelCursorAsync(
+                gap.ChannelId,
+                gap.BeforeMessageId,
+                cancellationToken
+            );
+            await store.MarkGapFilledAsync(gap.GapId, cancellationToken);
+            await store.FlushAsync(cancellationToken);
+
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Filled gap in '{channel.Name}' ({gap.AfterMessageId} .. {gap.BeforeMessageId})."
+                );
         }
     }
 }

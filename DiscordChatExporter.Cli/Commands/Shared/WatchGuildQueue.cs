@@ -58,6 +58,18 @@ public record ExportChannelItem(
     bool ForceFullScan
 ) : QueueItem;
 
+// A bounded [after, before] backfill for a recorded catch-up/downtime gap. Unlike an
+// ExportChannelItem -- which resumes from the channel's live-advanced last_message_id cursor and
+// so can be dragged past un-backfilled history by a concurrent live message -- this fetches a
+// fixed range that was snapshotted when the gap was recorded, immune to the moving cursor. An
+// interrupted run therefore just leaves the gap unfilled to be retried, never silently skipped.
+public record GapBackfillItem(
+    long GapId,
+    Snowflake ChannelId,
+    Snowflake AfterMessageId,
+    Snowflake BeforeMessageId
+) : QueueItem;
+
 public class WatchGuildQueue
 {
     private readonly object _lock = new();
@@ -77,12 +89,14 @@ public class WatchGuildQueue
     private readonly Queue<ThreadMembersUpdateItem> _pendingThreadMemberUpdates = new();
 
     private readonly Dictionary<Snowflake, PendingExport> _pendingExports = new();
+    private readonly Queue<GapBackfillItem> _pendingGapBackfills = new();
     private readonly Dictionary<string, PendingPatch> _pendingPatches = new();
     private readonly Dictionary<Snowflake, PendingDelete> _pendingDeletes = new();
     private DateTimeOffset? _guildSyncDue;
     private string? _guildSyncReason;
 
     private readonly Dictionary<Snowflake, int> _channelFailures = new();
+    private readonly Dictionary<long, int> _gapBackfillFailures = new();
     private readonly Dictionary<string, int> _patchFailures = new();
     private readonly Dictionary<Snowflake, int> _deleteFailures = new();
     private readonly Dictionary<Snowflake, int> _channelDeleteFailures = new();
@@ -145,6 +159,15 @@ public class WatchGuildQueue
         {
             lock (_lock)
                 return _inFlightExports;
+        }
+    }
+
+    public int PendingGapBackfillsCount
+    {
+        get
+        {
+            lock (_lock)
+                return _pendingGapBackfills.Count;
         }
     }
 
@@ -272,6 +295,21 @@ public class WatchGuildQueue
                     forceFullScan
                 );
             }
+        }
+    }
+
+    public void EnqueueGapBackfill(
+        long gapId,
+        Snowflake channelId,
+        Snowflake afterMessageId,
+        Snowflake beforeMessageId
+    )
+    {
+        lock (_lock)
+        {
+            _pendingGapBackfills.Enqueue(
+                new GapBackfillItem(gapId, channelId, afterMessageId, beforeMessageId)
+            );
         }
     }
 
@@ -431,6 +469,14 @@ public class WatchGuildQueue
 
             if (_inFlightExports < _maxConcurrentExports)
             {
+                // Gap backfills are bounded catch-up work; drain them ahead of the debounced
+                // regular exports while sharing the same concurrency budget.
+                if (_pendingGapBackfills.Count > 0)
+                {
+                    _inFlightExports++;
+                    return _pendingGapBackfills.Dequeue();
+                }
+
                 var dueExport = _pendingExports
                     .Where(e => e.Value.Due <= now)
                     .OrderBy(e => e.Value.Due)
@@ -461,6 +507,11 @@ public class WatchGuildQueue
             if (item is ExportChannelItem export)
             {
                 _channelFailures.Remove(export.ChannelId);
+                _inFlightExports--;
+            }
+            else if (item is GapBackfillItem gap)
+            {
+                _gapBackfillFailures.Remove(gap.GapId);
                 _inFlightExports--;
             }
             else if (item is PatchMessageItem patch)
@@ -527,6 +578,25 @@ public class WatchGuildQueue
                     export.IsCatchup,
                     export.ForceFullScan
                 );
+                return true;
+            }
+            if (item is GapBackfillItem gap)
+            {
+                // Free the shared export slot regardless of whether we retry below.
+                _inFlightExports--;
+
+                _gapBackfillFailures.TryGetValue(gap.GapId, out var count);
+                count++;
+                _gapBackfillFailures[gap.GapId] = count;
+                if (count >= 5)
+                {
+                    // Give up for now -- the gap row stays unfilled, so the next catch-up run (or
+                    // the fillgaps command) will pick it up again rather than losing it.
+                    _gapBackfillFailures.Remove(gap.GapId);
+                    return false;
+                }
+
+                _pendingGapBackfills.Enqueue(gap);
                 return true;
             }
             else if (item is PatchMessageItem patch)
