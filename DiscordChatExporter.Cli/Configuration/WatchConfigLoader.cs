@@ -61,6 +61,32 @@ public static class WatchConfigLoader
             servers.Add(ParseServer(srv, defaults, i));
         }
 
+        // Cross-server conflicts.
+        foreach (
+            var dup in servers
+                .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+        )
+            throw new CommandException(
+                $"Duplicate server name '{dup.First().Name}' -- server names must be unique "
+                    + "(they're how --server selects one)."
+            );
+
+        foreach (var dup in servers.GroupBy(s => s.Id).Where(g => g.Count() > 1))
+            throw new CommandException(
+                $"Duplicate server id '{dup.Key}' -- it appears on {dup.Count()} server entries."
+            );
+
+        foreach (
+            var dup in servers
+                .GroupBy(s => s.Output, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+        )
+            throw new CommandException(
+                $"Multiple servers write to the same output '{dup.Key}' -- each server needs its "
+                    + "own database file."
+            );
+
         return new WatchConfig
         {
             Token = GetScalar(root, "token"),
@@ -88,17 +114,52 @@ public static class WatchConfigLoader
             ?? throw new CommandException($"server '{name}' is missing required key 'output'.");
         output = Substitute(output, name, id);
 
+        var media = ParseMedia(GetMap(defaults, "media"), GetMap(srv, "media"), name, id);
+        var data = ParseData(GetMap(defaults, "data"), GetMap(srv, "data"));
+        var behavior = ParseBehavior(GetMap(defaults, "behavior"), GetMap(srv, "behavior"));
+        var exclude = ParseExclude(GetMap(defaults, "exclude"), GetMap(srv, "exclude"));
+
+        // Hard conflict: fetching reactor lists only makes sense if reactions are stored at all.
+        if (data.Reactors && !data.Reactions)
+            throw new CommandException(
+                $"server '{name}': data.reactors requires data.reactions -- reactor lists can't be "
+                    + "stored while reactions are disabled."
+            );
+
         return new ServerConfig
         {
             Name = name,
             Id = id,
             Enabled = GetBool(srv, "enabled") ?? true,
             Output = output,
-            Media = ParseMedia(GetMap(defaults, "media"), GetMap(srv, "media"), name, id),
-            Data = ParseData(GetMap(defaults, "data"), GetMap(srv, "data")),
-            Behavior = ParseBehavior(GetMap(defaults, "behavior"), GetMap(srv, "behavior")),
-            Exclude = ParseExclude(GetMap(defaults, "exclude"), GetMap(srv, "exclude")),
+            Media = media,
+            Data = data,
+            Behavior = behavior,
+            Exclude = exclude,
         };
+    }
+
+    // Non-fatal contradictions worth surfacing at startup: the config loads fine, but a setting is
+    // being silently overridden or does nothing. Reported per selected server by WatchCommand.
+    public static IReadOnlyList<string> CollectWarnings(ServerConfig server)
+    {
+        var warnings = new List<string>();
+
+        if (server.Media.Enabled && server.Media.Assets.Count == 0)
+            warnings.Add("media is enabled but 'assets' is empty -- no media will be downloaded.");
+
+        if (server.Data.Threads && server.Exclude.Threads)
+            warnings.Add(
+                "data.threads is on but exclude.threads is also on -- no threads will be captured."
+            );
+
+        if (!server.Behavior.CatchUp && !server.Behavior.ScanMissing)
+            warnings.Add(
+                "neither catch-up nor scan-missing is enabled -- only messages arriving live will "
+                    + "be captured (no backfill of history or gaps)."
+            );
+
+        return warnings;
     }
 
     private static MediaConfig ParseMedia(

@@ -35,6 +35,12 @@ public partial class WatchCommand : DiscordCommandBase
         var config = WatchConfigLoader.Load(ConfigPath);
         var server = SelectServer(config);
 
+        foreach (var warning in WatchConfigLoader.CollectWarnings(server))
+        {
+            using (console.WithForegroundColor(ConsoleColor.Yellow))
+                await console.Error.WriteLineAsync($"[watch] Warning ({server.Name}): {warning}");
+        }
+
         var settings = new WatchSettings
         {
             DownloadMedia = server.Media.Enabled,
