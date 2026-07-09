@@ -11,3 +11,5 @@ obj/
 # Test results
 TestResults/
 publish
+config/
+data/

@@ -1,0 +1,35 @@
+# 24/7 Discord guild watcher.
+#
+#   1. Set your bot token below (or in a .env file next to this: DISCORD_TOKEN=...).
+#   2. docker compose up -d --build
+#   3. On first start it creates ./config/watcher.yaml -- edit it (server id, output), then:
+#      docker compose restart
+#   4. Follow logs: docker compose logs -f
+#
+# Databases + media land in ./data; the config lives in ./config.
+
+services:
+  discord-watcher:
+    build:
+      context: .
+      dockerfile: watcher.dockerfile
+    image: discord-chat-watcher:latest
+    container_name: discord-watcher
+    restart: unless-stopped
+    # Proper PID 1 (signal forwarding + zombie reaping) so `docker stop` shuts the watcher down
+    # gracefully and it flushes cleanly.
+    init: true
+    environment:
+      # Bot token. Put DISCORD_TOKEN in a .env file, or replace ${DISCORD_TOKEN} with the value.
+      # Alternatively, omit this and set `token-file: /config/tokens.txt` in watcher.yaml.
+      - DISCORD_TOKEN=${DISCORD_TOKEN:-}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./config:/config
+      - ./data:/data
+    # Cap log growth so a long-running container can't fill the disk with logs.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

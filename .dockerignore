@@ -1,0 +1,14 @@
+# Keep the build context small and reproducible: the image publishes from source, so local build
+# outputs, VCS, IDE files, and the runtime volumes must not be sent to the daemon.
+**/bin/
+**/obj/
+.git/
+.github/
+.vs/
+.idea/
+node_modules/
+*.user
+
+# Runtime volumes created by compose (can be large -- databases + media).
+data/
+config/
