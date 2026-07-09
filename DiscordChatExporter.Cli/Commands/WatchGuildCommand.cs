@@ -316,6 +316,9 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         || _settings.SyncGuildCatalog
                         || _settings.CapturePins
                         || _settings.CapturePolls
+                        // Gap tracking runs whenever nothing else backfills (catch-up/scan off), and
+                        // should honor the same reconnect-flap throttle as the other startup work.
+                        || (!_settings.CatchUp && !_settings.ScanMissing)
                     )
                     {
                         lock (_catchUpLock)
@@ -345,13 +348,18 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             );
                     }
 
-                    // Pins are never covered by catch-up or message history (a pin/unpin during
-                    // downtime emits no event we'd otherwise see), so reconcile them explicitly.
-                    // To keep the REST cost bounded we only re-fetch pins for "active" channels --
-                    // those whose live last_message_id is ahead of our stored cursor -- and diff the
-                    // live pinned set against what the DB has, patching only what changed. This also
-                    // seeds _knownPinnedIds so the first live CHANNEL_PINS_UPDATE won't re-baseline.
-                    if (_settings.CapturePins && !skipRescan)
+                    // One channel-list pass at reconnect that drives two independent reconciliations,
+                    // both keyed on the same signal (a channel whose live last_message_id is ahead of
+                    // our stored cursor):
+                    //   * Gap tracking (only when catch-up/scan-missing are off, so nothing else
+                    //     backfills): record the (cursor, live] window of messages that arrived during
+                    //     downtime, so the hole is discoverable and `fillgaps` can recover it -- instead
+                    //     of the cursor silently jumping past it.
+                    //   * Pins: pins aren't covered by catch-up or message history, so diff the live
+                    //     pinned set against the DB for active channels and patch what changed (also
+                    //     seeds _knownPinnedIds so the first live CHANNEL_PINS_UPDATE won't re-baseline).
+                    var trackGaps = !_settings.CatchUp && !_settings.ScanMissing;
+                    if ((_settings.CapturePins || trackGaps) && !skipRescan)
                     {
                         _ = Task.Run(
                             async () =>
@@ -363,6 +371,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                         cts.Token
                                     );
                                     var reconciled = 0;
+                                    var gaps = 0;
                                     await foreach (
                                         var ch in Discord.GetGuildChannelsAsync(GuildId, cts.Token)
                                     )
@@ -381,36 +390,62 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                         if (!ch.MayHaveMessagesAfter(cursor))
                                             continue;
 
-                                        // Isolate each channel: a channel the bot can't read pins in
-                                        // (403 forbidden) or a transient failure must not abort the
+                                        // Isolate each channel: a channel the bot can't read (403
+                                        // forbidden) or a transient failure must not abort the
                                         // reconciliation of every remaining channel.
                                         try
                                         {
-                                            var livePins = await Discord.GetPinnedMessagesAsync(
-                                                ch.Id,
-                                                cts.Token
-                                            );
-                                            var livePinIds = new HashSet<Snowflake>(
-                                                livePins.Select(p => p.Id)
-                                            );
-                                            var storedPinIds = await store.GetPinnedMessageIdsAsync(
-                                                ch.Id,
-                                                cts.Token
-                                            );
+                                            // Gap: only for channels we were actually recording (a
+                                            // stored cursor exists). A never-seen channel is missing
+                                            // its whole history, which isn't a downtime gap.
+                                            if (
+                                                trackGaps
+                                                && storedCursors.TryGetValue(
+                                                    ch.Id,
+                                                    out var recordedCursor
+                                                )
+                                                && ch.LastMessageId is { } liveLast
+                                                && liveLast > recordedCursor
+                                            )
+                                            {
+                                                await store.RecordMessageGapAsync(
+                                                    ch.Id,
+                                                    recordedCursor,
+                                                    liveLast,
+                                                    cts.Token
+                                                );
+                                                gaps++;
+                                            }
 
-                                            var changed = new HashSet<Snowflake>(livePinIds);
-                                            changed.SymmetricExceptWith(storedPinIds);
-                                            foreach (var id in changed)
-                                                queue.EnqueuePatch(ch.Id, id, "pins-reconcile");
+                                            if (_settings.CapturePins)
+                                            {
+                                                var livePins = await Discord.GetPinnedMessagesAsync(
+                                                    ch.Id,
+                                                    cts.Token
+                                                );
+                                                var livePinIds = new HashSet<Snowflake>(
+                                                    livePins.Select(p => p.Id)
+                                                );
+                                                var storedPinIds =
+                                                    await store.GetPinnedMessageIdsAsync(
+                                                        ch.Id,
+                                                        cts.Token
+                                                    );
 
-                                            // Seed the in-memory baseline with the live set so the
-                                            // next live pins-update diffs against it instead of
-                                            // re-baselining.
-                                            lock (_knownPinnedIds)
-                                                _knownPinnedIds[ch.Id] = livePinIds;
+                                                var changed = new HashSet<Snowflake>(livePinIds);
+                                                changed.SymmetricExceptWith(storedPinIds);
+                                                foreach (var id in changed)
+                                                    queue.EnqueuePatch(ch.Id, id, "pins-reconcile");
 
-                                            if (changed.Count > 0)
-                                                reconciled++;
+                                                // Seed the in-memory baseline with the live set so the
+                                                // next live pins-update diffs against it instead of
+                                                // re-baselining.
+                                                lock (_knownPinnedIds)
+                                                    _knownPinnedIds[ch.Id] = livePinIds;
+
+                                                if (changed.Count > 0)
+                                                    reconciled++;
+                                            }
                                         }
                                         catch (OperationCanceledException)
                                         {
@@ -420,20 +455,33 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                         {
                                             lock (console)
                                                 console.Error.WriteLine(
-                                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile] Skipped channel {ch.Id}: {ex.Message}"
+                                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [reconnect-scan] Skipped channel {ch.Id}: {ex.Message}"
                                                 );
                                         }
                                     }
+
+                                    // Persist the recorded gaps promptly (they're written straight to
+                                    // the store from this background task).
+                                    if (gaps > 0)
+                                        await store.FlushAsync(cts.Token);
+
                                     lock (console)
-                                        console.Output.WriteLine(
-                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile] Reconciled pins in {reconciled} channel(s) with changes."
-                                        );
+                                    {
+                                        if (_settings.CapturePins)
+                                            console.Output.WriteLine(
+                                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile] Reconciled pins in {reconciled} channel(s) with changes."
+                                            );
+                                        if (trackGaps && gaps > 0)
+                                            console.Output.WriteLine(
+                                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gap-tracking] Recorded downtime gaps in {gaps} channel(s). Run `fillgaps` to backfill them."
+                                            );
+                                    }
                                 }
                                 catch (Exception ex)
                                 {
                                     lock (console)
                                         console.Error.WriteLine(
-                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile-error] {ex.Message}"
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [reconnect-scan-error] {ex.Message}"
                                         );
                                 }
                             },

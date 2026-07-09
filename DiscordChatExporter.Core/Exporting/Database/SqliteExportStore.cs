@@ -1879,6 +1879,175 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
+    // A recorded window of channel history that was never captured live (see Schema.V16).
+    public sealed record MessageGap(
+        long Id,
+        Snowflake ChannelId,
+        Snowflake AfterMessageId,
+        Snowflake BeforeMessageId
+    );
+
+    // Records a downtime gap for a channel: the (after, before] range that existed at reconnect but
+    // was never captured because catch-up was off. Coalesces with an existing unfilled gap starting
+    // at the same cursor -- repeated reconnects during one downtime-off stretch keep the same
+    // `after` and only push `before` forward -- so this never accumulates duplicate rows.
+    public async ValueTask RecordMessageGapAsync(
+        Snowflake channelId,
+        Snowflake afterMessageId,
+        Snowflake beforeMessageId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+
+            await using var command = CreateCommand(
+                """
+                INSERT INTO message_gap (
+                    channel_id, after_message_id, before_message_id, detected_at
+                )
+                SELECT $channelId, $after, $before, $detectedAt
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM message_gap
+                    WHERE channel_id = $channelId
+                      AND after_message_id = $after
+                      AND filled_at IS NULL
+                );
+
+                UPDATE message_gap
+                SET before_message_id = $before, detected_at = $detectedAt
+                WHERE channel_id = $channelId
+                  AND after_message_id = $after
+                  AND filled_at IS NULL
+                  AND before_message_id < $before;
+                """
+            );
+            command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+            command.Parameters.AddWithValue("$after", ToDbId(afterMessageId));
+            command.Parameters.AddWithValue("$before", ToDbId(beforeMessageId));
+            command.Parameters.AddWithValue(
+                "$detectedAt",
+                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+            );
+            await command.ExecuteNonQueryAsync(cancellationToken);
+
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // Unfilled downtime gaps, optionally restricted to one guild. Consumed by the fillgaps command.
+    public async ValueTask<IReadOnlyList<MessageGap>> GetUnfilledGapsAsync(
+        Snowflake? guildId = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                guildId is null
+                    ? """
+                    SELECT id, channel_id, after_message_id, before_message_id
+                    FROM message_gap
+                    WHERE filled_at IS NULL
+                    ORDER BY id;
+                    """
+                    : """
+                    SELECT g.id, g.channel_id, g.after_message_id, g.before_message_id
+                    FROM message_gap g
+                    JOIN channel c ON c.id = g.channel_id
+                    WHERE g.filled_at IS NULL AND c.guild_id = $guildId
+                    ORDER BY g.id;
+                    """
+            );
+            if (guildId is { } gid)
+                command.Parameters.AddWithValue("$guildId", ToDbId(gid));
+
+            var result = new List<MessageGap>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                result.Add(
+                    new MessageGap(
+                        reader.GetInt64(0),
+                        FromDbId(reader.GetInt64(1)),
+                        FromDbId(reader.GetInt64(2)),
+                        FromDbId(reader.GetInt64(3))
+                    )
+                );
+
+            return result;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    public async ValueTask MarkGapFilledAsync(
+        long gapId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+            await using var command = CreateCommand(
+                "UPDATE message_gap SET filled_at = $filledAt WHERE id = $id;"
+            );
+            command.Parameters.AddWithValue(
+                "$filledAt",
+                DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture)
+            );
+            command.Parameters.AddWithValue("$id", gapId);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // Sets just the last_export_after/before bookkeeping on a channel without touching its cursor.
+    // fillgaps uses this to undo the export window a bounded backfill leaves behind, so a later
+    // catch-up doesn't mistake the channel for one that needs a full rescan.
+    public async ValueTask SetChannelExportWindowAsync(
+        Snowflake channelId,
+        Snowflake? lastExportAfter,
+        Snowflake? lastExportBefore,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureTransactionAsync(cancellationToken);
+            await using var command = CreateCommand(
+                """
+                UPDATE channel
+                SET last_export_after = $after, last_export_before = $before
+                WHERE id = $id;
+                """
+            );
+            command.Parameters.AddWithValue("$after", ToDbId(lastExportAfter));
+            command.Parameters.AddWithValue("$before", ToDbId(lastExportBefore));
+            command.Parameters.AddWithValue("$id", ToDbId(channelId));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+            await MaybeAutoFlushAsync(cancellationToken);
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private async ValueTask UpsertThreadMemberCoreAsync(
         Snowflake channelId,
         ThreadMember member,
