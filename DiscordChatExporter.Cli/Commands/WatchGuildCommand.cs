@@ -310,7 +310,13 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 if (eventType == "READY")
                 {
                     var skipRescan = false;
-                    if (_settings.CatchUp || _settings.ScanMissing || _settings.SyncGuildCatalog)
+                    if (
+                        _settings.CatchUp
+                        || _settings.ScanMissing
+                        || _settings.SyncGuildCatalog
+                        || _settings.CapturePins
+                        || _settings.CapturePolls
+                    )
                     {
                         lock (_catchUpLock)
                         {
@@ -337,6 +343,143 @@ public partial class WatchGuildCommand : DiscordCommandBase
                             console.Output.WriteLine(
                                 $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued guild-catalog sync (startup)."
                             );
+                    }
+
+                    // Pins are never covered by catch-up or message history (a pin/unpin during
+                    // downtime emits no event we'd otherwise see), so reconcile them explicitly.
+                    // To keep the REST cost bounded we only re-fetch pins for "active" channels --
+                    // those whose live last_message_id is ahead of our stored cursor -- and diff the
+                    // live pinned set against what the DB has, patching only what changed. This also
+                    // seeds _knownPinnedIds so the first live CHANNEL_PINS_UPDATE won't re-baseline.
+                    if (_settings.CapturePins && !skipRescan)
+                    {
+                        _ = Task.Run(
+                            async () =>
+                            {
+                                try
+                                {
+                                    var storedCursors = await store.GetChannelLastMessageIdsAsync(
+                                        GuildId,
+                                        cts.Token
+                                    );
+                                    var reconciled = 0;
+                                    await foreach (
+                                        var ch in Discord.GetGuildChannelsAsync(GuildId, cts.Token)
+                                    )
+                                    {
+                                        // Categories/forums hold no messages of their own, so no pins.
+                                        if (ch.IsCategory || ch.Kind == ChannelKind.GuildForum)
+                                            continue;
+                                        if (IsChannelExcluded(ch))
+                                        {
+                                            MarkChannelExcluded(ch.Id);
+                                            continue;
+                                        }
+                                        // "Active" = has messages beyond our stored cursor (a
+                                        // never-scanned channel uses cursor 0, so it counts too).
+                                        var cursor = storedCursors.GetValueOrDefault(ch.Id);
+                                        if (!ch.MayHaveMessagesAfter(cursor))
+                                            continue;
+
+                                        // Isolate each channel: a channel the bot can't read pins in
+                                        // (403 forbidden) or a transient failure must not abort the
+                                        // reconciliation of every remaining channel.
+                                        try
+                                        {
+                                            var livePins = await Discord.GetPinnedMessagesAsync(
+                                                ch.Id,
+                                                cts.Token
+                                            );
+                                            var livePinIds = new HashSet<Snowflake>(
+                                                livePins.Select(p => p.Id)
+                                            );
+                                            var storedPinIds = await store.GetPinnedMessageIdsAsync(
+                                                ch.Id,
+                                                cts.Token
+                                            );
+
+                                            var changed = new HashSet<Snowflake>(livePinIds);
+                                            changed.SymmetricExceptWith(storedPinIds);
+                                            foreach (var id in changed)
+                                                queue.EnqueuePatch(ch.Id, id, "pins-reconcile");
+
+                                            // Seed the in-memory baseline with the live set so the
+                                            // next live pins-update diffs against it instead of
+                                            // re-baselining.
+                                            lock (_knownPinnedIds)
+                                                _knownPinnedIds[ch.Id] = livePinIds;
+
+                                            if (changed.Count > 0)
+                                                reconciled++;
+                                        }
+                                        catch (OperationCanceledException)
+                                        {
+                                            throw;
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            lock (console)
+                                                console.Error.WriteLine(
+                                                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile] Skipped channel {ch.Id}: {ex.Message}"
+                                                );
+                                        }
+                                    }
+                                    lock (console)
+                                        console.Output.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile] Reconciled pins in {reconciled} channel(s) with changes."
+                                        );
+                                }
+                                catch (Exception ex)
+                                {
+                                    lock (console)
+                                        console.Error.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pins-reconcile-error] {ex.Message}"
+                                        );
+                                }
+                            },
+                            cts.Token
+                        );
+                    }
+
+                    // A poll that ended while the watcher was offline never had its finalized
+                    // results captured -- the stored poll_json still reads is_finalized=false with
+                    // stale counts. Re-fetch each such message once to pull in the final tally.
+                    // (Only aggregate counts are recoverable; Discord has no post-hoc voter list.)
+                    if (_settings.CapturePolls && !skipRescan)
+                    {
+                        _ = Task.Run(
+                            async () =>
+                            {
+                                try
+                                {
+                                    var polls = await store.GetUnfinalizedExpiredPollsAsync(
+                                        DateTimeOffset.UtcNow,
+                                        cts.Token
+                                    );
+                                    var queued = 0;
+                                    foreach (var (channelId, messageId) in polls)
+                                    {
+                                        if (IsExcludedChannelId(channelId))
+                                            continue;
+                                        queue.EnqueuePatch(channelId, messageId, "poll-reconcile");
+                                        queued++;
+                                    }
+                                    if (queued > 0)
+                                        lock (console)
+                                            console.Output.WriteLine(
+                                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [poll-reconcile] Queued {queued} finished poll(s) for a results refresh."
+                                            );
+                                }
+                                catch (Exception ex)
+                                {
+                                    lock (console)
+                                        console.Error.WriteLine(
+                                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [poll-reconcile-error] {ex.Message}"
+                                        );
+                                }
+                            },
+                            cts.Token
+                        );
                     }
 
                     if (_settings.CatchUp && !skipRescan)
@@ -1260,8 +1403,19 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Syncing guild catalog ({sync.Reason})..."
                 );
+            // Snapshot the exclusion set (the background catch-up task mutates it) so SyncGuildAsync
+            // leaves excluded channels untouched -- neither upserting them nor marking them deleted.
+            HashSet<Snowflake> excludedSnapshot;
+            lock (_excludedLock)
+                excludedSnapshot = new HashSet<Snowflake>(_excludedChannelIds);
             var (roleCount, emojiCount, stickerCount, scheduledEventCount) =
-                await SyncGuildCommand.SyncGuildAsync(Discord, store, GuildId, cancellationToken);
+                await SyncGuildCommand.SyncGuildAsync(
+                    Discord,
+                    store,
+                    GuildId,
+                    excludedSnapshot,
+                    cancellationToken
+                );
             // Roles may have changed (create/update/delete all funnel through here) -- drop the
             // cached catalog so the next live message resolves author roles against fresh data.
             _guildRoles = null;

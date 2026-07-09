@@ -412,4 +412,12 @@ internal static class Schema
         CREATE INDEX IF NOT EXISTS message_channel_mention_channel
             ON message_channel_mention(channel_id);
         """;
+
+    // Partial index over just the messages that carry a poll, so the startup finished-poll
+    // reconciliation can enumerate polls (to find unfinalized ones whose expiry has passed) without
+    // scanning the entire message table. Polls are a tiny fraction of messages, so this index stays
+    // small.
+    public const string V15 = """
+        CREATE INDEX IF NOT EXISTS message_poll ON message(id) WHERE poll_json IS NOT NULL;
+        """;
 }

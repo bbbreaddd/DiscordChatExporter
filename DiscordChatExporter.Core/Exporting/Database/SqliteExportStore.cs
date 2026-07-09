@@ -136,6 +136,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (12, Schema.V12),
         (13, Schema.V13),
         (14, Schema.V14),
+        (15, Schema.V15),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -1748,19 +1749,135 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken = default
     ) => GetActiveIdsAsync("guild_sticker", guildId, null, cancellationToken);
 
-    // Only categories/forums, matching what SyncGuildAsync itself upserts from
-    // GetGuildChannelsAsync (regular channels/threads are covered by their own export path, not
-    // this presync step).
-    public ValueTask<HashSet<Snowflake>> GetActiveCategoryAndForumIdsAsync(
+    // Every active non-thread channel (categories, forums, and regular text/voice/etc.), matching
+    // what GetGuildChannelsAsync returns. Threads are excluded because that endpoint never returns
+    // them, so a deletion diff based on it would otherwise sweep every thread up as "deleted".
+    // Used by SyncGuildAsync's channel reconciliation as the "still active" baseline to diff the
+    // live channel list against.
+    public ValueTask<HashSet<Snowflake>> GetActiveChannelIdsAsync(
         Snowflake guildId,
         CancellationToken cancellationToken = default
     ) =>
         GetActiveIdsAsync(
             "channel",
             guildId,
-            "AND kind IN ('GuildCategory', 'GuildForum')",
+            "AND kind NOT IN ('GuildNewsThread', 'GuildPublicThread', 'GuildPrivateThread')",
             cancellationToken
         );
+
+    // Bulk map of channel id -> stored last_message_id cursor for a guild (only channels that have
+    // one). The startup pins reconciliation uses this to decide which channels are "active" (their
+    // live last_message_id is ahead of what we last stored) and therefore worth a pin re-fetch.
+    public async ValueTask<Dictionary<Snowflake, Snowflake>> GetChannelLastMessageIdsAsync(
+        Snowflake guildId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                "SELECT id, last_message_id FROM channel "
+                    + "WHERE guild_id = $guildId AND last_message_id IS NOT NULL;"
+            );
+            command.Parameters.AddWithValue("$guildId", ToDbId(guildId));
+
+            var result = new Dictionary<Snowflake, Snowflake>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                result[FromDbId(reader.GetInt64(0))] = FromDbId(reader.GetInt64(1));
+
+            return result;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // The set of message ids currently marked pinned in a channel. The startup pins reconciliation
+    // diffs this DB baseline against the live pinned list so it can patch only the messages whose
+    // pinned state actually changed while the watcher was offline.
+    public async ValueTask<HashSet<Snowflake>> GetPinnedMessageIdsAsync(
+        Snowflake channelId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                "SELECT id FROM message "
+                    + "WHERE channel_id = $channelId AND is_pinned = 1 AND deleted_at IS NULL;"
+            );
+            command.Parameters.AddWithValue("$channelId", ToDbId(channelId));
+
+            var ids = new HashSet<Snowflake>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                ids.Add(FromDbId(reader.GetInt64(0)));
+
+            return ids;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    // Messages whose stored poll has not been finalized but whose expiry has already passed -- i.e.
+    // polls that concluded (possibly while the watcher was offline) but whose final results we never
+    // captured. The startup poll reconciliation re-fetches each of these once to pull in the
+    // finalized counts. Already-finalized and still-open polls are skipped. Backed by the partial
+    // index message_poll (Schema.V15) so this doesn't scan the whole message table.
+    public async ValueTask<
+        IReadOnlyList<(Snowflake ChannelId, Snowflake MessageId)>
+    > GetUnfinalizedExpiredPollsAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await using var command = CreateCommand(
+                "SELECT channel_id, id, poll_json FROM message "
+                    + "WHERE poll_json IS NOT NULL AND deleted_at IS NULL;"
+            );
+
+            var result = new List<(Snowflake, Snowflake)>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                PollDto? poll;
+                try
+                {
+                    poll = JsonSerializer.Deserialize(
+                        reader.GetString(2),
+                        DatabaseJsonContext.Default.PollDto
+                    );
+                }
+                catch (JsonException)
+                {
+                    // A malformed poll_json row shouldn't abort the whole reconciliation.
+                    continue;
+                }
+
+                if (poll is null || poll.IsFinalized)
+                    continue;
+                if (poll.Expiry is not { } expiry || expiry > now)
+                    continue;
+
+                result.Add((FromDbId(reader.GetInt64(0)), FromDbId(reader.GetInt64(1))));
+            }
+
+            return result;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
 
     private async ValueTask UpsertThreadMemberCoreAsync(
         Snowflake channelId,

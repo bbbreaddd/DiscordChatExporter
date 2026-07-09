@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -93,10 +94,12 @@ public partial class SyncGuildCommand : DiscordCommandBase
             cancellationToken
         );
 
+        // The standalone syncguild command has no exclusion config, so it reconciles every channel.
         var (roleCount, emojiCount, stickerCount, scheduledEventCount) = await SyncGuildAsync(
             Discord,
             store,
             GuildId,
+            excludedChannelIds: null,
             cancellationToken
         );
 
@@ -116,6 +119,7 @@ public partial class SyncGuildCommand : DiscordCommandBase
         DiscordClient discord,
         SqliteExportStore store,
         Snowflake guildId,
+        IReadOnlySet<Snowflake>? excludedChannelIds = null,
         CancellationToken cancellationToken = default
     )
     {
@@ -190,29 +194,32 @@ public partial class SyncGuildCommand : DiscordCommandBase
             scheduledEventCount++;
         }
 
-        // Categories and forums are both filtered out everywhere channels are exported (a
-        // category has no messages of its own, and a forum's "messages" are really its threads,
-        // exported individually), so this is the only place their own id/name/position ever gets
-        // persisted -- otherwise their relative order among their siblings is lost, even though
-        // each channel's/thread's order *within* its container is stored on its own row.
+        // Reconcile the full channel list: upsert every (non-excluded) channel the API returns, and
+        // soft-delete any active non-thread channel it no longer returns. This refreshes channel
+        // metadata (name/topic/nsfw/position/permission overwrites) that drifts while the watcher is
+        // offline, and -- since there is no CHANNEL_CREATE gateway handler -- is the only way a
+        // brand-new channel with no messages ever gets recorded before its first message arrives.
+        // It also persists categories/forums, whose own id/name/position are stored nowhere else
+        // (they're filtered out of every message-export path).
         //
-        // This is also the deletion safety net for regular/category/forum channels missed while
-        // the watcher was offline (CHANNEL_DELETE is handled live, but only catches channels
-        // deleted while connected). Threads have no equivalent here -- GetGuildChannelsAsync
-        // doesn't return them, and a full thread listing on every sync would be far too
-        // expensive -- so a thread deleted purely during downtime relies on THREAD_DELETE having
-        // been live at the time, same limitation as several other live-only signals in this tool.
-        var activeChannelIds = await store.GetActiveCategoryAndForumIdsAsync(
-            guildId,
-            cancellationToken
-        );
+        // Threads are deliberately out of scope: GetGuildChannelsAsync never returns them, so a
+        // deletion diff based on it would sweep every thread up as "deleted", and a full thread
+        // listing on every sync would be far too expensive. A thread deleted purely during downtime
+        // relies on THREAD_DELETE having been live at the time, same as several other live-only
+        // signals in this tool. Threads' metadata is refreshed by their own export path instead.
+        var activeChannelIds = await store.GetActiveChannelIdsAsync(guildId, cancellationToken);
         await foreach (var channel in discord.GetGuildChannelsAsync(guildId, cancellationToken))
         {
-            if (channel.IsCategory || channel.Kind == ChannelKind.GuildForum)
+            // An excluded channel is left entirely untouched: not upserted, and dropped from the
+            // active set so the deletion diff below doesn't mistake it for a removed channel.
+            if (excludedChannelIds?.Contains(channel.Id) == true)
             {
-                await store.UpsertChannelAsync(channel, cancellationToken);
                 activeChannelIds.Remove(channel.Id);
+                continue;
             }
+
+            await store.UpsertChannelAsync(channel, cancellationToken);
+            activeChannelIds.Remove(channel.Id);
         }
         foreach (var removedId in activeChannelIds)
             await store.MarkChannelDeletedAsync(removedId, deletedAt, cancellationToken);
