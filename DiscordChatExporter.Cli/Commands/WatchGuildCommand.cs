@@ -310,7 +310,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 if (eventType == "READY")
                 {
                     var skipRescan = false;
-                    if (_settings.CatchUp || _settings.ScanMissing)
+                    if (_settings.CatchUp || _settings.ScanMissing || _settings.SyncGuildCatalog)
                     {
                         lock (_catchUpLock)
                         {
@@ -328,6 +328,15 @@ public partial class WatchGuildCommand : DiscordCommandBase
                                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Skipping rescan -- one already started within the last {CatchUpMinInterval.TotalSeconds:F0}s."
                                 );
                         }
+                    }
+
+                    if (_settings.SyncGuildCatalog && !skipRescan)
+                    {
+                        queue.EnqueueGuildSync("startup", immediate: true);
+                        lock (console)
+                            console.Output.WriteLine(
+                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [catch-up] Queued guild-catalog sync (startup)."
+                            );
                     }
 
                     if (_settings.CatchUp && !skipRescan)

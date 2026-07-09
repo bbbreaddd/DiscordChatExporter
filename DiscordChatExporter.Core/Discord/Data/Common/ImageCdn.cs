@@ -29,7 +29,12 @@ public static class ImageCdn
 
     public static string GetCustomEmojiUrl(Snowflake emojiId, bool isAnimated = false) =>
         isAnimated
-            ? $"https://cdn.discordapp.com/emojis/{emojiId}.gif"
+            // Animated emoji must be requested as animated WebP, not GIF. Discord no longer
+            // generates a .gif rendition for newer animated emoji -- that endpoint returns 415
+            // Unsupported Media Type -- while .webp?animated=true serves the animated image for
+            // both old and new emoji. Without animated=true the .webp endpoint returns only a
+            // static first frame.
+            ? $"https://cdn.discordapp.com/emojis/{emojiId}.webp?animated=true"
             : $"https://cdn.discordapp.com/emojis/{emojiId}.png";
 
     public static string GetGuildIconUrl(Snowflake guildId, string iconHash, int size = 512) =>
@@ -81,7 +86,12 @@ public static class ImageCdn
             : $"https://cdn.discordapp.com/guilds/{guildId}/users/{userId}/avatars/{avatarHash}.png?size={size}";
 
     public static string GetStickerUrl(Snowflake stickerId, string format = "png") =>
-        $"https://cdn.discordapp.com/stickers/{stickerId}.{format}";
+        // GIF-format (animated) stickers are served only from the media proxy host; the same path
+        // on cdn.discordapp.com returns 404. PNG/APNG (.png) and Lottie (.json) stickers live on
+        // the regular CDN as usual.
+        format == "gif"
+            ? $"https://media.discordapp.net/stickers/{stickerId}.gif"
+            : $"https://cdn.discordapp.com/stickers/{stickerId}.{format}";
 
     public static string GetRoleIconUrl(Snowflake roleId, string iconHash, int size = 512) =>
         $"https://cdn.discordapp.com/role-icons/{roleId}/{iconHash}.png?size={size}";

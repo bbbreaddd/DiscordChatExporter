@@ -359,12 +359,15 @@ public class WatchGuildQueue
         }
     }
 
-    public void EnqueueGuildSync(string reason)
+    // `immediate` schedules the sync for the next pump tick instead of after the debounce window.
+    // The debounce exists to coalesce bursts of live GUILD_*_UPDATE dispatches; a one-shot startup
+    // sync has nothing to coalesce, so waiting it out would just delay picking up offline changes.
+    public void EnqueueGuildSync(string reason, bool immediate = false)
     {
         lock (_lock)
         {
             var now = DateTimeOffset.UtcNow;
-            _guildSyncDue = now + _guildSyncDebounce;
+            _guildSyncDue = immediate ? now : now + _guildSyncDebounce;
             _guildSyncReason = reason;
         }
     }
