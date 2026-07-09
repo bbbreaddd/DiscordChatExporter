@@ -1522,6 +1522,11 @@ public partial class WatchGuildCommand : DiscordCommandBase
         }
         else if (item is ThreadMembersUpdateItem threadUpdate)
         {
+            // thread_member.channel_id foreign-keys the channel row, so make sure the thread's
+            // channel (and its guild) exist before inserting members. Without this, a
+            // THREAD_MEMBERS_UPDATE that arrives before the thread has been captured (a fresh DB,
+            // or a thread not yet reached by catch-up) fails the FK and the join/leave is lost.
+            await EnsureChannelExistsAsync(threadUpdate.ChannelId, store, cancellationToken);
             if (threadUpdate.AddedMembers.Count > 0)
                 await store.AddThreadMembersAsync(
                     threadUpdate.ChannelId,
