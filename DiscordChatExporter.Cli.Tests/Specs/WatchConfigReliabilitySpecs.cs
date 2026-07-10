@@ -106,6 +106,38 @@ public class WatchConfigReliabilitySpecs
         fullScan.Media.Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("Null")]
+    [InlineData("~")]
+    [InlineData("")] // `key:` with no value
+    public void Full_scan_null_window_and_max_channels_load_as_unset(string nullSpelling)
+    {
+        // Regression: the shipped default template ships `after: null` / `before: null` /
+        // `max-channels: null`. YamlDotNet hands a plain YAML null back as the literal text
+        // "null", which previously blew up config load (TimeWindow rejected "null" as a window;
+        // GetInt rejected "null" as an integer), crash-looping the watcher on its own default
+        // config the first time it was built and run. A plain YAML null must load as unset.
+        var config = Load(
+            $"""
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+                full-scan:
+                  enabled: false
+                  after: {nullSpelling}
+                  before: {nullSpelling}
+                  max-channels: {nullSpelling}
+            """
+        );
+
+        var fullScan = config.Servers[0].FullScan;
+        fullScan.After.Should().BeNull();
+        fullScan.Before.Should().BeNull();
+        fullScan.MaxChannels.Should().BeNull();
+    }
+
     [Fact]
     public void Reliability_features_default_to_disabled_when_omitted()
     {

@@ -6,6 +6,7 @@ using System.Linq;
 using CliFx;
 using Cronos;
 using DiscordChatExporter.Core.Discord;
+using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 
 namespace DiscordChatExporter.Cli.Configuration;
@@ -485,8 +486,24 @@ public static class WatchConfigLoader
         return null;
     }
 
-    private static string? GetScalar(YamlMappingNode? map, string key) =>
-        Find(map, key) is YamlScalarNode s ? s.Value : null;
+    private static string? GetScalar(YamlMappingNode? map, string key)
+    {
+        if (Find(map, key) is not YamlScalarNode s)
+            return null;
+
+        // Treat an explicit YAML null (`key: null`, `key: ~`, or `key:` with no value) the same as
+        // an absent key. Otherwise YamlDotNet hands back the literal text "null", which downstream
+        // parsers reject -- e.g. full-scan after/before (TimeWindow) and max-channels (GetInt) all
+        // ship `null` as their documented "unset" default. Only plain (unquoted) scalars count, so
+        // a deliberately quoted "null" is still preserved as the string.
+        if (
+            s.Style == ScalarStyle.Plain
+            && s.Value is null or "" or "~" or "null" or "Null" or "NULL"
+        )
+            return null;
+
+        return s.Value;
+    }
 
     private static bool? GetBool(YamlMappingNode? map, string key)
     {
