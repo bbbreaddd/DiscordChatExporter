@@ -10,6 +10,8 @@ using CliFx.Binding;
 using CliFx.Infrastructure;
 using DiscordChatExporter.Cli.Commands.Base;
 using DiscordChatExporter.Cli.Commands.Shared;
+using DiscordChatExporter.Cli.Configuration;
+using DiscordChatExporter.Cli.Utils;
 using DiscordChatExporter.Cli.Utils.Extensions;
 using DiscordChatExporter.Core.Discord;
 using DiscordChatExporter.Core.Discord.Data;
@@ -151,12 +153,48 @@ public partial class WatchGuildCommand : DiscordCommandBase
         return false;
     }
 
+    // Applies the full-scan block's own scope (its include/exclude channel + category lists) to a
+    // listed channel/thread. The server-level exclusions are applied separately via IsChannelExcluded,
+    // so a full-scan never re-scans a channel the watcher is configured to skip. Category scoping
+    // matches on a channel's parent category; threads (whose parent is their channel) are matched by
+    // id, so pair category scoping with include-threads + explicit ids if you need thread coverage.
+    private bool InFullScanScope(Channel channel)
+    {
+        var fs = _settings.FullScan;
+        if (fs.Channels.Count > 0 && !fs.Channels.Contains(channel.Id))
+            return false;
+        if (fs.Categories.Count > 0)
+        {
+            var categoryId = channel.Parent?.Id;
+            if (categoryId is null || !fs.Categories.Contains(categoryId.Value))
+                return false;
+        }
+        if (fs.ExcludeChannels.Contains(channel.Id))
+            return false;
+        if (channel.Parent is { } parent && fs.ExcludeCategories.Contains(parent.Id))
+            return false;
+        return true;
+    }
+
     // When set (the `watch --config` path), these replace the CLI options as the source of the
     // watch's behavior. Null on the plain `watchguild` CLI path, where BuildSettingsFromOptions()
     // maps the options instead. GuildId/OutputPath/token are always taken from the command itself.
     internal WatchSettings? SettingsOverride { get; set; }
 
     private WatchSettings _settings = null!;
+
+    // Set for the duration of a scheduled full-scan run (see RunFullScanAsync), consulted by
+    // CreateExportRequestAsync for force-full-scan exports only. Volatile because it is written by
+    // the scheduler task and read by the export pump. Null whenever no full-scan is in flight.
+    private volatile FullScanProfile? _activeFullScanProfile;
+
+    // A fatal gateway close (revoked token/intents) fires a notification and then cancels; the
+    // handler stashes that in-flight notify here so the shutdown path can await delivery before the
+    // process exits (the notify runs on CancellationToken.None so the cancel doesn't kill it).
+    private Task? _fatalCloseNotifyTask;
+
+    // The window + reactor policy a scheduled full-scan applies to its force-full-scan exports.
+    private sealed record FullScanProfile(Snowflake? After, Snowflake? Before, bool EnrichReactors);
 
     private WatchSettings BuildSettingsFromOptions() =>
         new()
@@ -247,6 +285,12 @@ public partial class WatchGuildCommand : DiscordCommandBase
             cancellationToken
         );
 
+        // Operator notifications (Apprise). Empty target list when notifications are disabled, so
+        // HasTargets is false and every notify call is a no-op.
+        var notifier = new AppriseNotifier(
+            _settings.Notifications.Enabled ? _settings.Notifications.Urls : Array.Empty<string>()
+        );
+
         var gatewayClient = new GatewayClient(firstToken);
 
         gatewayClient.LogMessage += msg =>
@@ -278,6 +322,17 @@ public partial class WatchGuildCommand : DiscordCommandBase
                         + $"to (re)connect {failureCount} times in a row. Still retrying..."
                 );
             }
+
+            // ConnectionDown is raised exactly once per outage (the client guards it), so this
+            // fires at most once per stuck period -- no debouncing needed here. Fire-and-forget on
+            // an uncancellable token: the watcher keeps retrying regardless of delivery.
+            if (_settings.Notifications.OnConnectionDown && notifier.HasTargets)
+                _ = notifier.TryNotifyAsync(
+                    "[watchguild] Gateway connection down",
+                    $"Guild {GuildId}: the gateway has failed to (re)connect {failureCount} times "
+                        + "in a row and is still retrying.",
+                    CancellationToken.None
+                );
         };
 
         gatewayClient.ConnectionRestored += failureCount =>
@@ -300,6 +355,20 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [gateway-fatal] Fatal close occurred. Stopping..."
                 );
             }
+
+            // Kick off the notification BEFORE cancelling -- a fatal close (revoked token/intents,
+            // auth failure) stops the watcher for good, so this is the alert the operator most needs.
+            // Runs on CancellationToken.None so the cancel below doesn't abort it; the shutdown path
+            // awaits _fatalCloseNotifyTask so delivery completes before the process exits.
+            if (_settings.Notifications.OnFatalClose && notifier.HasTargets)
+                _fatalCloseNotifyTask = notifier.TryNotifyAsync(
+                    "[watchguild] Fatal gateway close -- watcher stopping",
+                    $"Guild {GuildId}: the gateway reported a fatal close (usually a revoked token or "
+                        + "revoked/insufficient intents). The watcher is shutting down and will not "
+                        + "reconnect until it is restarted.",
+                    CancellationToken.None
+                );
+
             cts.Cancel();
         };
 
@@ -1100,6 +1169,194 @@ public partial class WatchGuildCommand : DiscordCommandBase
 
         var gatewayTask = Task.Run(() => gatewayClient.RunAsync(cts.Token), cts.Token);
 
+        // ----- Scheduled reliability jobs (backup + full-scan), driven by cron -----
+
+        // A scheduled online backup via a separate read connection (never blocks the writer).
+        async Task RunBackupJobAsync(CancellationToken jobToken)
+        {
+            var cfg = _settings.Backup;
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [backup] Starting scheduled backup to '{cfg.Dir}'..."
+                );
+            try
+            {
+                var service = new DatabaseBackupService(
+                    OutputPath,
+                    cfg.Dir!,
+                    cfg.KeepDaily,
+                    cfg.KeepWeekly,
+                    cfg.Compress,
+                    cfg.IntegrityCheck
+                );
+                var result = await service.RunAsync(jobToken);
+                var sizeMb = result.SizeBytes / 1024d / 1024d;
+
+                if (!result.IntegrityOk)
+                {
+                    lock (console)
+                        console.Error.WriteLine(
+                            $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [backup] Backup written to '{result.Path}' but FAILED its integrity check."
+                        );
+                    if (_settings.Notifications.OnBackupFailure && notifier.HasTargets)
+                        await notifier.TryNotifyAsync(
+                            "[watchguild] Backup integrity check FAILED",
+                            $"Guild {GuildId}: backup '{result.Path}' failed PRAGMA quick_check -- the copy may be corrupt.",
+                            jobToken
+                        );
+                    return;
+                }
+
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [backup] Backup ok: '{result.Path}' ({sizeMb:F1} MB); pruned {result.Pruned} old copies."
+                    );
+                if (_settings.Notifications.OnBackupSuccess && notifier.HasTargets)
+                    await notifier.TryNotifyAsync(
+                        "[watchguild] Backup complete",
+                        $"Guild {GuildId}: backup written to '{result.Path}' ({sizeMb:F1} MB); pruned {result.Pruned} old copies.",
+                        jobToken
+                    );
+            }
+            catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lock (console)
+                    console.Error.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [backup] Backup FAILED: {ex.Message}"
+                    );
+                if (_settings.Notifications.OnBackupFailure && notifier.HasTargets)
+                    await notifier.TryNotifyAsync(
+                        "[watchguild] Backup FAILED",
+                        $"Guild {GuildId}: scheduled backup failed: {ex.Message}",
+                        CancellationToken.None
+                    );
+            }
+        }
+
+        // A scheduled full re-scan of the in-scope channels/threads, to reconcile edits/reactions on
+        // already-stored messages that catch-up can't see. Runs in-process through the shared store,
+        // so it serializes cleanly with live capture (no cross-process "database is locked").
+        async Task RunFullScanJobAsync(CancellationToken jobToken)
+        {
+            var cfg = _settings.FullScan;
+            var now = DateTimeOffset.UtcNow;
+            Snowflake? after = cfg.After is not null
+                ? Snowflake.FromDate(TimeWindow.Resolve(cfg.After, now))
+                : null;
+            Snowflake? before = cfg.Before is not null
+                ? Snowflake.FromDate(TimeWindow.Resolve(cfg.Before, now))
+                : null;
+
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [full-scan] Starting scheduled full-scan..."
+                );
+
+            _activeFullScanProfile = new FullScanProfile(after, before, cfg.EnrichReactors);
+            store.SuppressMediaDownloads = !cfg.Media;
+            try
+            {
+                var channels = new List<Channel>();
+                await foreach (var ch in Discord.GetGuildChannelsAsync(GuildId, jobToken))
+                {
+                    if (!ch.IsCategory && ch.Kind != ChannelKind.GuildForum)
+                        channels.Add(ch);
+                }
+                if (cfg.IncludeThreads)
+                {
+                    await foreach (
+                        var th in Discord.GetGuildThreadsAsync(
+                            GuildId,
+                            includeArchived: true,
+                            cancellationToken: jobToken
+                        )
+                    )
+                    {
+                        if (th.Kind != ChannelKind.GuildForum)
+                            channels.Add(th);
+                    }
+                }
+
+                var queued = 0;
+                foreach (var ch in channels)
+                {
+                    if (cfg.MaxChannels is { } max && queued >= max)
+                        break;
+                    if (IsChannelExcluded(ch))
+                    {
+                        MarkChannelExcluded(ch.Id);
+                        continue;
+                    }
+                    if (!InFullScanScope(ch))
+                        continue;
+                    queue.EnqueueChannelExport(ch.Id, forceFullScan: true);
+                    queued++;
+                }
+
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [full-scan] Queued {queued} channels/threads; waiting for drain..."
+                    );
+
+                // Wait for the enqueued exports to drain so the completion notification and the
+                // media-flag reset below reflect the true end of the scan. The shared export
+                // counters can be nudged up by concurrent live re-exports, which only extends the
+                // wait -- harmless.
+                while (
+                    !jobToken.IsCancellationRequested
+                    && (queue.PendingChannelsCount > 0 || queue.InFlightExportsCount > 0)
+                )
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), jobToken);
+                }
+
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [full-scan] Completed full-scan of {queued} channels/threads."
+                    );
+                if (_settings.Notifications.OnFullScanComplete && notifier.HasTargets)
+                    await notifier.TryNotifyAsync(
+                        "[watchguild] Full-scan complete",
+                        $"Guild {GuildId}: scheduled full-scan finished ({queued} channels/threads re-scanned).",
+                        jobToken
+                    );
+            }
+            finally
+            {
+                store.SuppressMediaDownloads = false;
+                _activeFullScanProfile = null;
+            }
+        }
+
+        var scheduledJobs = new List<CronScheduler.Job>();
+        if (_settings.Backup.Enabled)
+            scheduledJobs.Add(
+                new CronScheduler.Job("backup", _settings.Backup.Schedule, RunBackupJobAsync)
+            );
+        if (_settings.FullScan.Enabled)
+            scheduledJobs.Add(
+                new CronScheduler.Job("full-scan", _settings.FullScan.Schedule, RunFullScanJobAsync)
+            );
+
+        var scheduler = new CronScheduler(
+            scheduledJobs,
+            TimeZoneInfo.Local,
+            msg =>
+            {
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [scheduler] {msg}"
+                    );
+            }
+        );
+        var schedulerTask = scheduler.HasJobs
+            ? Task.Run(() => scheduler.RunAsync(cts.Token), cts.Token)
+            : Task.CompletedTask;
+
         // Processes one item and reports the outcome back to the queue. Shared between the
         // sequential inline path (everything except channel exports) and the concurrent
         // background path (channel exports only, see the loop below) so both go through
@@ -1256,6 +1513,24 @@ public partial class WatchGuildCommand : DiscordCommandBase
             await gatewayTask;
         }
         catch (OperationCanceledException) { }
+
+        try
+        {
+            await schedulerTask;
+        }
+        catch (OperationCanceledException) { }
+
+        // If a fatal close triggered shutdown, make sure its notification actually went out before
+        // the process exits (the notify was started on CancellationToken.None so the cancel didn't
+        // abort it, but we still have to wait for it here).
+        if (_fatalCloseNotifyTask is not null)
+        {
+            try
+            {
+                await _fatalCloseNotifyTask;
+            }
+            catch { }
+        }
     }
 
     // Renders a single-line, log-friendly preview of a message for the live [message] feed --
@@ -1351,6 +1626,20 @@ public partial class WatchGuildCommand : DiscordCommandBase
     {
         var channel = await Discord.GetChannelAsync(channelId, cancellationToken);
         var guild = await Discord.GetGuildAsync(channel.GuildId, cancellationToken);
+
+        Snowflake? before = null;
+        var enrichReactors = _settings.EnrichReactors;
+
+        // A scheduled full-scan sets _activeFullScanProfile for the duration of its run and applies
+        // its own window + reactor policy -- but only to force-full-scan exports. Live/debounced
+        // exports (forceFullScan == false) always keep the watcher's defaults.
+        if (forceFullScan && _activeFullScanProfile is { } profile)
+        {
+            after ??= profile.After;
+            before = profile.Before;
+            enrichReactors = profile.EnrichReactors;
+        }
+
         return new ExportRequest(
             guild,
             channel,
@@ -1358,7 +1647,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
             null,
             ExportFormat.Db,
             after,
-            null,
+            before,
             PartitionLimit.Null,
             MessageFilter.Null,
             false,
@@ -1368,7 +1657,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
             null,
             false,
             forceFullScan: forceFullScan,
-            enrichReactors: _settings.EnrichReactors
+            enrichReactors: enrichReactors
         );
     }
 

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using CliFx;
+using Cronos;
 using DiscordChatExporter.Core.Discord;
 using YamlDotNet.RepresentationModel;
 
@@ -38,12 +39,16 @@ public static class WatchConfigLoader
         RequireKnownKeys(
             root,
             "<root>",
-            ["token", "token-file", "respect-rate-limits", "defaults", "servers"]
+            ["token", "token-file", "respect-rate-limits", "notifications", "defaults", "servers"]
         );
 
         var defaults = GetMap(root, "defaults");
         if (defaults is not null)
-            RequireKnownKeys(defaults, "defaults", ["media", "data", "behavior", "exclude"]);
+            RequireKnownKeys(
+                defaults,
+                "defaults",
+                ["media", "data", "behavior", "exclude", "backup", "full-scan"]
+            );
 
         var serversSeq = GetSequence(root, "servers");
         if (serversSeq is null || serversSeq.Children.Count == 0)
@@ -56,7 +61,18 @@ public static class WatchConfigLoader
             RequireKnownKeys(
                 srv,
                 $"servers[{i}]",
-                ["name", "id", "enabled", "output", "media", "data", "behavior", "exclude"]
+                [
+                    "name",
+                    "id",
+                    "enabled",
+                    "output",
+                    "media",
+                    "data",
+                    "behavior",
+                    "exclude",
+                    "backup",
+                    "full-scan",
+                ]
             );
             servers.Add(ParseServer(srv, defaults, i));
         }
@@ -92,6 +108,7 @@ public static class WatchConfigLoader
             Token = GetScalar(root, "token"),
             TokenFile = GetScalar(root, "token-file"),
             RespectRateLimits = GetBool(root, "respect-rate-limits") ?? true,
+            Notifications = ParseNotifications(GetMap(root, "notifications")),
             Servers = servers,
         };
     }
@@ -118,6 +135,8 @@ public static class WatchConfigLoader
         var data = ParseData(GetMap(defaults, "data"), GetMap(srv, "data"));
         var behavior = ParseBehavior(GetMap(defaults, "behavior"), GetMap(srv, "behavior"));
         var exclude = ParseExclude(GetMap(defaults, "exclude"), GetMap(srv, "exclude"));
+        var backup = ParseBackup(GetMap(defaults, "backup"), GetMap(srv, "backup"), name, id);
+        var fullScan = ParseFullScan(GetMap(defaults, "full-scan"), GetMap(srv, "full-scan"), name);
 
         // Hard conflict: fetching reactor lists only makes sense if reactions are stored at all.
         if (data.Reactors && !data.Reactions)
@@ -136,6 +155,8 @@ public static class WatchConfigLoader
             Data = data,
             Behavior = behavior,
             Exclude = exclude,
+            Backup = backup,
+            FullScan = fullScan,
         };
     }
 
@@ -268,6 +289,182 @@ public static class WatchConfigLoader
             Nsfw = GetBool(srv, "nsfw") ?? GetBool(def, "nsfw") ?? false,
             Threads = GetBool(srv, "threads") ?? GetBool(def, "threads") ?? false,
         };
+    }
+
+    private static BackupConfig ParseBackup(
+        YamlMappingNode? def,
+        YamlMappingNode? srv,
+        string name,
+        Snowflake id
+    )
+    {
+        string[] allowed =
+        [
+            "enabled",
+            "schedule",
+            "dir",
+            "keep-daily",
+            "keep-weekly",
+            "compress",
+            "integrity-check",
+        ];
+        RequireKnownKeys(def, "defaults.backup", allowed);
+        RequireKnownKeys(srv, "backup", allowed);
+
+        var enabled = GetBool(srv, "enabled") ?? GetBool(def, "enabled") ?? false;
+
+        var schedule = GetScalar(srv, "schedule") ?? GetScalar(def, "schedule") ?? "30 5 * * *";
+        ValidateCron(schedule, $"server '{name}' backup.schedule");
+
+        var dir = GetScalar(srv, "dir") ?? GetScalar(def, "dir");
+        if (enabled && string.IsNullOrWhiteSpace(dir))
+            throw new CommandException(
+                $"server '{name}': backup.dir is required when backup is enabled."
+            );
+
+        var keepDaily = GetInt(srv, "keep-daily") ?? GetInt(def, "keep-daily") ?? 7;
+        var keepWeekly = GetInt(srv, "keep-weekly") ?? GetInt(def, "keep-weekly") ?? 4;
+        if (keepDaily < 0 || keepWeekly < 0)
+            throw new CommandException(
+                $"server '{name}': backup.keep-daily / keep-weekly must be >= 0."
+            );
+
+        return new BackupConfig
+        {
+            Enabled = enabled,
+            Schedule = schedule,
+            Dir = dir is not null ? Substitute(dir, name, id) : null,
+            KeepDaily = keepDaily,
+            KeepWeekly = keepWeekly,
+            Compress = GetBool(srv, "compress") ?? GetBool(def, "compress") ?? false,
+            IntegrityCheck =
+                GetBool(srv, "integrity-check") ?? GetBool(def, "integrity-check") ?? true,
+        };
+    }
+
+    private static FullScanConfig ParseFullScan(
+        YamlMappingNode? def,
+        YamlMappingNode? srv,
+        string name
+    )
+    {
+        string[] allowed =
+        [
+            "enabled",
+            "schedule",
+            "channels",
+            "categories",
+            "exclude-channels",
+            "exclude-categories",
+            "include-threads",
+            "after",
+            "before",
+            "max-channels",
+            "enrich-reactors",
+            "media",
+        ];
+        RequireKnownKeys(def, "defaults.full-scan", allowed);
+        RequireKnownKeys(srv, "full-scan", allowed);
+
+        var schedule = GetScalar(srv, "schedule") ?? GetScalar(def, "schedule") ?? "0 4 * * 0";
+        ValidateCron(schedule, $"server '{name}' full-scan.schedule");
+
+        var after = GetScalar(srv, "after") ?? GetScalar(def, "after");
+        var before = GetScalar(srv, "before") ?? GetScalar(def, "before");
+        ValidateWindow(after, $"server '{name}' full-scan.after");
+        ValidateWindow(before, $"server '{name}' full-scan.before");
+
+        var maxChannels = GetInt(srv, "max-channels") ?? GetInt(def, "max-channels");
+        if (maxChannels is < 1)
+            throw new CommandException(
+                $"server '{name}': full-scan.max-channels must be at least 1."
+            );
+
+        // Lists replace (rather than concatenate) when overridden per server -- matches ParseExclude.
+        IReadOnlyList<Snowflake> ListOf(string key) =>
+            Find(srv, key) is not null ? GetSnowflakeList(srv, key) : GetSnowflakeList(def, key);
+
+        return new FullScanConfig
+        {
+            Enabled = GetBool(srv, "enabled") ?? GetBool(def, "enabled") ?? false,
+            Schedule = schedule,
+            Channels = ListOf("channels"),
+            Categories = ListOf("categories"),
+            ExcludeChannels = ListOf("exclude-channels"),
+            ExcludeCategories = ListOf("exclude-categories"),
+            IncludeThreads =
+                GetBool(srv, "include-threads") ?? GetBool(def, "include-threads") ?? true,
+            After = after,
+            Before = before,
+            MaxChannels = maxChannels,
+            EnrichReactors =
+                GetBool(srv, "enrich-reactors") ?? GetBool(def, "enrich-reactors") ?? true,
+            Media = GetBool(srv, "media") ?? GetBool(def, "media") ?? true,
+        };
+    }
+
+    private static NotificationConfig ParseNotifications(YamlMappingNode? map)
+    {
+        RequireKnownKeys(map, "notifications", ["enabled", "urls", "on"]);
+
+        var on = GetMap(map, "on");
+        RequireKnownKeys(
+            on,
+            "notifications.on",
+            [
+                "fatal-close",
+                "connection-down",
+                "backup-failure",
+                "backup-success",
+                "full-scan-complete",
+            ]
+        );
+
+        var enabled = GetBool(map, "enabled") ?? false;
+        var urls = GetStringList(map, "urls") ?? [];
+        if (enabled && urls.Count == 0)
+            throw new CommandException(
+                "notifications are enabled but 'urls' is empty -- add at least one Apprise URL."
+            );
+
+        return new NotificationConfig
+        {
+            Enabled = enabled,
+            Urls = urls,
+            OnFatalClose = GetBool(on, "fatal-close") ?? true,
+            OnConnectionDown = GetBool(on, "connection-down") ?? true,
+            OnBackupFailure = GetBool(on, "backup-failure") ?? true,
+            OnBackupSuccess = GetBool(on, "backup-success") ?? false,
+            OnFullScanComplete = GetBool(on, "full-scan-complete") ?? true,
+        };
+    }
+
+    private static void ValidateCron(string schedule, string ctx)
+    {
+        try
+        {
+            CronExpression.Parse(schedule);
+        }
+        catch (Exception ex)
+        {
+            throw new CommandException(
+                $"{ctx}: invalid cron expression '{schedule}' ({ex.Message})."
+            );
+        }
+    }
+
+    private static void ValidateWindow(string? value, string ctx)
+    {
+        if (value is null)
+            return;
+        try
+        {
+            TimeWindow.Resolve(value, DateTimeOffset.UtcNow);
+        }
+        catch (FormatException ex)
+        {
+            throw new CommandException($"{ctx}: {ex.Message}");
+        }
     }
 
     // ---- DOM helpers ----

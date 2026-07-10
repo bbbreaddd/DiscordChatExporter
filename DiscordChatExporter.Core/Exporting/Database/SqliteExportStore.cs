@@ -32,6 +32,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private readonly bool _retryFailedMedia;
     private readonly StoreDataOptions _dataOptions;
 
+    // When true, media downloads are skipped store-wide (rows are still written, just without the
+    // local file). The scheduled full-scan flips this on for a run configured with `media: false`
+    // so a reconciliation pass doesn't re-fetch assets; it is reset once the scan drains. Because
+    // the store is shared with live capture, this also suppresses live media for the duration --
+    // an accepted, opt-in trade-off (media is idempotent and re-derivable from the stored URL).
+    public volatile bool SuppressMediaDownloads;
+
     // All public members serialize through this so the single underlying connection (and its
     // at-most-one open transaction) is never touched from two threads at once -- callers may
     // export multiple channels concurrently, but writes to the shared database must not.
@@ -299,7 +306,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
         CancellationToken cancellationToken
     )
     {
-        if (_mediaDownloader is null || _mediaDirPath is null || !IsDiscordMediaUrl(sourceUrl))
+        if (
+            _mediaDownloader is null
+            || _mediaDirPath is null
+            || SuppressMediaDownloads
+            || !IsDiscordMediaUrl(sourceUrl)
+        )
             return null;
 
         // Per-asset-kind gating from the watcher config (e.g. capture attachments but not emojis).

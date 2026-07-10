@@ -39,6 +39,16 @@ LABEL org.opencontainers.image.licenses="MIT"
 
 # Alpine lacks ICU (needed for locale-aware formatting), tzdata (timezones), and su-exec (drop root).
 RUN apk add --no-cache icu-libs icu-data-full tzdata su-exec
+
+# Apprise CLI, used by the watcher to send operator notifications (backup/full-scan/fatal-close) to
+# any of 100+ services from a single config. Installed into an isolated venv (avoids Alpine's
+# externally-managed-environment restriction, PEP 668) and symlinked onto PATH as `apprise`, which is
+# the binary AppriseNotifier shells out to.
+RUN apk add --no-cache python3 py3-pip \
+    && python3 -m venv /opt/apprise \
+    && /opt/apprise/bin/pip install --no-cache-dir apprise \
+    && ln -s /opt/apprise/bin/apprise /usr/local/bin/apprise
+
 ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false
 ENV LC_ALL=en_US.UTF-8
 ENV LANG=en_US.UTF-8

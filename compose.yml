@@ -27,6 +27,10 @@ services:
     volumes:
       - ./config:/config
       - ./data:/data
+      # Existing media on the HDD, reused in place (no re-download). Mounted outside /data so the
+      # entrypoint's `chown -R /data` doesn't crawl the whole tree on every start. The host dir must
+      # be owned by UID 1000 (the container's dce user) so new downloads can be written.
+      - ${DCE_MEDIA_DIR:-./media}:/media
     # Cap log growth so a long-running container can't fill the disk with logs.
     logging:
       driver: json-file

@@ -13,6 +13,7 @@
     <PackageVersion Include="Cogwheel" Version="2.1.1" />
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageVersion Include="coverlet.collector" Version="10.0.1" />
+    <PackageVersion Include="Cronos" Version="0.9.0" />
     <PackageVersion Include="CSharpier.MsBuild" Version="1.2.6" />
     <PackageVersion Include="Deorcify" Version="2.0.1" />
     <PackageVersion Include="DialogHost.Avalonia" Version="0.12.2" />

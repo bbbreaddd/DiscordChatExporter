@@ -16,6 +16,21 @@ token-file: /path/to/tokens.txt
 # Respect Discord's advisory rate limits (recommended). false = only back off on hard 429s.
 respect-rate-limits: true
 
+# Operator notifications via the bundled Apprise CLI (100+ services from one config). Process-wide,
+# so it lives here rather than per-server. Disabled by default.
+notifications:
+  enabled: false
+  # Any Apprise service URLs -- Discord webhook, Telegram, ntfy, email, ... See
+  # https://github.com/caronc/apprise/wiki for the full URL syntax.
+  urls:
+    - "discord://webhook_id/webhook_token"
+  on:                       # which events fire a notification
+    fatal-close: true       # gateway fatal close (revoked token/intents) -- the watcher is stopping
+    connection-down: true   # gateway stuck reconnecting (raised once per outage)
+    backup-failure: true    # a scheduled backup threw or failed its integrity check
+    backup-success: false   # every successful backup (noisy; off by default)
+    full-scan-complete: true
+
 defaults:
   media:
     enabled: true
@@ -48,6 +63,38 @@ defaults:
     categories: []        # category ids -> skips all channels under them
     nsfw: false           # skip channels flagged NSFW
     threads: false        # skip all threads
+
+  # Scheduled online backup of the database, taken via a separate read connection so it never blocks
+  # live capture. Timestamped copies with a daily+weekly retention policy. Disabled by default.
+  backup:
+    enabled: false
+    schedule: "30 5 * * *"  # 5-field cron in the container's timezone (TZ). 05:30 daily by default
+                            # -- deliberately not 04:00, to avoid a router/network reboot window.
+    dir: /data/backups      # required when enabled
+    keep-daily: 7           # keep the newest copy for each of the last N days
+    keep-weekly: 4          # ...plus the newest for each of the last N ISO weeks
+    compress: false         # gzip each copy
+    integrity-check: true   # PRAGMA quick_check each copy (notifies on failure)
+
+  # Scheduled periodic full re-scan, to reconcile edits/reactions on already-stored messages that
+  # live catch-up can't see. Runs in-process through the shared store (no cross-process locking).
+  # Disabled by default.
+  full-scan:
+    enabled: false
+    schedule: "0 4 * * 0"       # cron; weekly (Sun 04:00) by default
+    channels: []                # explicit channel/thread ids; empty = everything in scope
+    categories: []              # restrict to channels under these categories
+    exclude-channels: []        # channel/thread ids to skip
+    exclude-categories: []      # categories to skip
+    include-threads: true       # also re-scan threads
+    after: null                 # window lower bound: ISO date or duration ("30d","12h","2w","90m")
+    before: null                # window upper bound (same forms). null = unbounded
+    max-channels: null          # cap channels re-scanned per run (null = no cap)
+    enrich-reactors: true       # fetch full reactor lists during the scan (see data.reactors)
+    media: true                 # download media found during the scan. false suppresses media
+                                # store-wide for the scan's duration (live capture included).
+    # Note: full-scan exports run at the watcher's shared export concurrency
+    # (behavior.catch-up-parallel); there is no separate per-scan parallelism knob.
 
 servers:
   - name: My Server

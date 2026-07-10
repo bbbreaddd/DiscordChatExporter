@@ -12,6 +12,10 @@ public record WatchConfig
     public string? Token { get; init; }
     public string? TokenFile { get; init; }
     public bool RespectRateLimits { get; init; } = true;
+
+    // Process-wide notification config (one bot process watches one server), so it lives at the top
+    // level alongside the token rather than per-server.
+    public NotificationConfig Notifications { get; init; } = new();
     public IReadOnlyList<ServerConfig> Servers { get; init; } = [];
 }
 
@@ -25,6 +29,67 @@ public record ServerConfig
     public DataConfig Data { get; init; } = new();
     public BehaviorConfig Behavior { get; init; } = new();
     public ExcludeConfig Exclude { get; init; } = new();
+    public BackupConfig Backup { get; init; } = new();
+    public FullScanConfig FullScan { get; init; } = new();
+}
+
+// Scheduled online backup of this server's database. Runs on a cron schedule inside the watcher via a
+// separate read connection (so it never blocks live capture); see DatabaseBackupService.
+public record BackupConfig
+{
+    public bool Enabled { get; init; }
+
+    // Standard 5-field cron (minute hour day month day-of-week), evaluated in the container timezone.
+    // Default 05:30 daily -- deliberately not 04:00, to avoid overlapping a router/network reboot.
+    public string Schedule { get; init; } = "30 5 * * *";
+    public string? Dir { get; init; }
+    public int KeepDaily { get; init; } = 7;
+    public int KeepWeekly { get; init; } = 4;
+    public bool Compress { get; init; }
+    public bool IntegrityCheck { get; init; } = true;
+}
+
+// Scheduled periodic full re-scan (force-full-scan) of some/all channels, to reconcile changes catch-up
+// can't see (edits/reactions on already-stored messages). Runs in-process through the shared store, so
+// it serializes cleanly with live capture (no cross-process "database is locked").
+public record FullScanConfig
+{
+    public bool Enabled { get; init; }
+    public string Schedule { get; init; } = "0 4 * * 0";
+
+    // Scope. Empty `Channels`/`Categories` means "everything in scope"; the exclude lists and the
+    // server-level ExcludeConfig both still apply.
+    public IReadOnlyList<Snowflake> Channels { get; init; } = [];
+    public IReadOnlyList<Snowflake> Categories { get; init; } = [];
+    public IReadOnlyList<Snowflake> ExcludeChannels { get; init; } = [];
+    public IReadOnlyList<Snowflake> ExcludeCategories { get; init; } = [];
+    public bool IncludeThreads { get; init; } = true;
+
+    // Limits. After/Before are raw strings resolved at run time -- either an absolute date
+    // (ISO-8601) or a relative duration like "30d"/"12h"/"4w" (subtracted from "now" each run).
+    public string? After { get; init; }
+    public string? Before { get; init; }
+    public int? MaxChannels { get; init; }
+    public bool EnrichReactors { get; init; } = true;
+
+    // When false, the run skips media downloads (rows are still reconciled). Note this suppresses
+    // media store-wide while the scan drains, live capture included -- see
+    // SqliteExportStore.SuppressMediaDownloads. Full-scan exports run at the watcher's shared export
+    // concurrency (`behavior.catch-up-parallel`); there is no separate per-scan parallelism knob.
+    public bool Media { get; init; } = true;
+}
+
+// How the watcher notifies the operator, via the bundled Apprise CLI (see AppriseNotifier). `Urls` are
+// Apprise service URLs (discord://, tgram://, ...). The On* flags gate which events fire a notification.
+public record NotificationConfig
+{
+    public bool Enabled { get; init; }
+    public IReadOnlyList<string> Urls { get; init; } = [];
+    public bool OnFatalClose { get; init; } = true;
+    public bool OnConnectionDown { get; init; } = true;
+    public bool OnBackupFailure { get; init; } = true;
+    public bool OnBackupSuccess { get; init; }
+    public bool OnFullScanComplete { get; init; } = true;
 }
 
 public record MediaConfig

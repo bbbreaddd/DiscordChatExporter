@@ -13,7 +13,18 @@
 # `--server <name|id>`). Run one container per server to watch several at once.
 
 # token-file: /config/tokens.txt      # or set DISCORD_TOKEN in the compose environment
-respect-rate-limits: true             # false = only back off on hard 429s (faster, riskier)
+respect-rate-limits: true # false = only back off on hard 429s (faster, riskier)
+
+notifications:
+  enabled: false
+  urls:
+    - "discord://webhook_id/webhook_token" # any Apprise URL: tgram://, ntfy://, mailto://, ...
+  on:
+    fatal-close: true # gateway fatal close (revoked token/intents) -- watcher stopping
+    connection-down: true # gateway stuck reconnecting (raised once per outage)
+    backup-failure: true # backup threw or failed its integrity check
+    backup-success: false # every successful backup (noisy; off by default)
+    full-scan-complete: true
 
 defaults:
   media:
@@ -21,36 +32,74 @@ defaults:
     # %SERVER% / %NAME% -> server name, %ID% -> server id.
     dir: /data/media/%SERVER%
     # Asset kinds to download. Remove any you don't want.
-    assets: [attachments, avatars, emojis, stickers, guild-icons, guild-banners, role-icons, user-banners]
+    assets:
+      [
+        attachments,
+        avatars,
+        emojis,
+        stickers,
+        guild-icons,
+        guild-banners,
+        role-icons,
+        user-banners,
+      ]
 
   data:
-    reactions: true       # store each message's reactions + counts (from the payload, free)
-    reactors: false       # ALSO fetch the full reactor list per emoji during catch-up/rescan
-                          # (expensive: one paginated request per emoji per message). Live
-                          # reactions are recorded from the gateway regardless.
+    reactions: true # store each message's reactions + counts (from the payload, free)
+    reactors:
+      false # ALSO fetch the full reactor list per emoji during catch-up/rescan
+      # (expensive: one paginated request per emoji per message). Live
+      # reactions are recorded from the gateway regardless.
     embeds: true
     stickers: true
     polls: true
-    threads: true         # enumerate & watch threads (and thread creates)
-    pins: true            # track pin changes
-    members: true         # capture author guild-member info (nick/roles/join date) from the gateway
-    guild-catalog: true   # periodically sync roles / emoji / stickers / scheduled events
+    threads: true # enumerate & watch threads (and thread creates)
+    pins: true # track pin changes
+    members: true # capture author guild-member info (nick/roles/join date) from the gateway
+    guild-catalog: true # periodically sync roles / emoji / stickers / scheduled events
 
   behavior:
-    catch-up: true            # on connect, backfill every channel from its stored cursor
-    scan-missing: false       # on connect, full re-scan of every channel (heavier than catch-up)
-    catch-up-parallel: 10     # channels exported concurrently (per-channel rate limits are independent)
-    retry-failed: false       # retry media URLs previously recorded as permanently gone (404/410)
+    catch-up: true # on connect, backfill every channel from its stored cursor
+    scan-missing: false # on connect, full re-scan of every channel (heavier than catch-up)
+    catch-up-parallel: 10 # channels exported concurrently (per-channel rate limits are independent)
+    retry-failed: false # retry media URLs previously recorded as permanently gone (404/410)
 
   exclude:
-    channels: []          # channel ids to skip entirely
-    categories: []        # category ids -> skips all channels under them
-    nsfw: false           # skip channels flagged NSFW
-    threads: false        # skip all threads
+    channels: [] # channel ids to skip entirely
+    categories: [] # category ids -> skips all channels under them
+    nsfw: false # skip channels flagged NSFW
+    threads: false # skip all threads
+
+  # Scheduled online backup (separate read connection, never blocks live capture). Disabled by default.
+  backup:
+    enabled: false
+    schedule: "30 5 * * *" # cron in container TZ; 05:30 daily
+    dir: /data/backups # required when enabled
+    keep-daily: 7 # newest copy for each of the last N days
+    keep-weekly: 4 # ...plus the newest for each of the last N ISO weeks
+    compress: false # gzip each copy
+    integrity-check: true # PRAGMA quick_check each copy (notifies on failure)
+
+  # Scheduled periodic full re-scan (reconciles edits/reactions on already-stored messages), run
+  # in-process through the shared store. Disabled by default.
+  full-scan:
+    enabled: false
+    schedule: "0 5 * * 0" # cron; weekly (Sun 05:00) by default
+    channels: [] # explicit ids; empty = everything in scope
+    categories: [] # restrict to channels under these categories
+    exclude-channels: []
+    exclude-categories: []
+    include-threads: true
+    after: null # window lower bound: ISO date or duration ("30d","12h","2w","90m")
+    before: null # window upper bound (same forms); null = unbounded
+    max-channels: null # cap channels re-scanned per run (null = no cap)
+    enrich-reactors: true # fetch full reactor lists during the scan
+    media: true # false suppresses media store-wide for the scan's duration
+    # full-scan exports share behavior.catch-up-parallel; no separate parallelism knob.
 
 servers:
   - name: MyServer
-    id: REPLACE_WITH_SERVER_ID        # your server (guild) id
+    id: REPLACE_WITH_SERVER_ID # your server (guild) id
     enabled: true
     output: /data/MyServer.db
     # Per-server overrides of the defaults above, e.g.:

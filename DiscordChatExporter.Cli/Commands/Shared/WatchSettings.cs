@@ -37,4 +37,10 @@ public record WatchSettings
     public IReadOnlySet<Snowflake> ExcludeCategories { get; init; } = new HashSet<Snowflake>();
     public bool ExcludeNsfw { get; init; }
     public bool ExcludeThreads { get; init; }
+
+    // Reliability safety nets (all default-off, so the CLI path and a minimal config are unaffected).
+    // Backup + FullScan are per-server; Notifications is process-wide (one bot watches one server).
+    public BackupConfig Backup { get; init; } = new();
+    public FullScanConfig FullScan { get; init; } = new();
+    public NotificationConfig Notifications { get; init; } = new();
 }

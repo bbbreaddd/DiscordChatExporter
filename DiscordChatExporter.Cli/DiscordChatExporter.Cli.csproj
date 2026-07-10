@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <PackageReference Include="CliFx" />
+    <PackageReference Include="Cronos" />
     <PackageReference Include="CSharpier.MsBuild" PrivateAssets="all" />
     <PackageReference Include="Deorcify" />
     <PackageReference Include="Gress" />

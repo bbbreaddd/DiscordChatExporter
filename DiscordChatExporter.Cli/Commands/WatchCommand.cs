@@ -63,6 +63,9 @@ public partial class WatchCommand : DiscordCommandBase
             ExcludeCategories = server.Exclude.Categories.ToHashSet(),
             ExcludeNsfw = server.Exclude.Nsfw,
             ExcludeThreads = server.Exclude.Threads,
+            Backup = server.Backup,
+            FullScan = server.FullScan,
+            Notifications = config.Notifications,
         };
 
         // Delegate to the existing single-guild watcher: the token/output/guild come from the
