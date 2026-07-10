@@ -193,6 +193,13 @@ public partial class WatchGuildCommand : DiscordCommandBase
     // process exits (the notify runs on CancellationToken.None so the cancel doesn't kill it).
     private Task? _fatalCloseNotifyTask;
 
+    // The inline (pump-thread) live-write handlers no longer flush per item; they set this and the
+    // main loop flushes once when the queue drains, batching a burst of live events into a single
+    // transaction. Only ever touched on the pump thread (inline processing is awaited sequentially
+    // with the drain check), so no synchronization is needed; background channel/gap exports
+    // self-flush and never set it.
+    private bool _hasPendingInlineWrites;
+
     // The window + reactor policy a scheduled full-scan applies to its force-full-scan exports.
     private sealed record FullScanProfile(Snowflake? After, Snowflake? Before, bool EnrichReactors);
 
@@ -1486,6 +1493,33 @@ public partial class WatchGuildCommand : DiscordCommandBase
             }
             else
             {
+                // Queue drained: commit any live writes the inline handlers batched since the last
+                // flush, in one transaction. Background channel/gap exports self-flush, so this
+                // only commits the inline hot-path writes. Durability tradeoff: on a hard kill an
+                // uncommitted batch is lost, but each item's resume cursor commits in the same
+                // transaction as its data, so catch-up/gap recording re-covers it on restart.
+                if (_hasPendingInlineWrites)
+                {
+                    try
+                    {
+                        await store.FlushAsync(cts.Token);
+                        _hasPendingInlineWrites = false;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Keep the flag set so the batch is retried on the next drain; a transient
+                        // flush failure (e.g. lock contention) must not kill the pump loop.
+                        lock (console)
+                            console.Error.WriteLine(
+                                $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [flush-error] Failed to flush batched live writes: {ex.Message}"
+                            );
+                    }
+                }
+
                 try
                 {
                     // Short idle tick so a freshly-arrived live message is picked up within ~100ms
@@ -1507,6 +1541,25 @@ public partial class WatchGuildCommand : DiscordCommandBase
             await Task.WhenAll(inFlightExportTasks);
         }
         catch { }
+
+        // Commit any live writes still batched from the last inline drain before the store is
+        // disposed, so a graceful shutdown doesn't drop them. Best-effort on CancellationToken.None
+        // since cts is already cancelled here.
+        if (_hasPendingInlineWrites)
+        {
+            try
+            {
+                await store.FlushAsync(CancellationToken.None);
+                _hasPendingInlineWrites = false;
+            }
+            catch (Exception ex)
+            {
+                lock (console)
+                    console.Error.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [flush-error] Failed to flush batched live writes on shutdown: {ex.Message}"
+                    );
+            }
+        }
 
         try
         {
@@ -1735,7 +1788,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 upsert.Message.Id,
                 cancellationToken
             );
-            await store.FlushAsync(cancellationToken);
+            _hasPendingInlineWrites = true;
             return;
         }
 
@@ -1766,7 +1819,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 vote.IsAdded,
                 cancellationToken
             );
-            await store.FlushAsync(cancellationToken);
+            _hasPendingInlineWrites = true;
 
             var result = await PatchMessageAsync(vote.ChannelId, vote.MessageId);
             lock (console)
@@ -1789,7 +1842,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     cancellationToken
                 );
             }
-            await store.FlushAsync(cancellationToken);
+            _hasPendingInlineWrites = true;
             lock (console)
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Marked messages deleted."
@@ -1802,7 +1855,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                 DateTimeOffset.UtcNow,
                 cancellationToken
             );
-            await store.FlushAsync(cancellationToken);
+            _hasPendingInlineWrites = true;
             if (wasMarked)
                 lock (console)
                     console.Output.WriteLine(
@@ -1828,7 +1881,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
                     threadUpdate.RemovedMemberIds,
                     cancellationToken
                 );
-            await store.FlushAsync(cancellationToken);
+            _hasPendingInlineWrites = true;
         }
         else if (item is SyncGuildItem sync)
         {
@@ -1852,6 +1905,7 @@ public partial class WatchGuildCommand : DiscordCommandBase
             // Roles may have changed (create/update/delete all funnel through here) -- drop the
             // cached catalog so the next live message resolves author roles against fresh data.
             _guildRoles = null;
+            _hasPendingInlineWrites = true;
             lock (console)
                 console.Output.WriteLine(
                     $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [pump] Synced guild catalog: {roleCount} roles, {emojiCount} emojis, {stickerCount} stickers, {scheduledEventCount} events."

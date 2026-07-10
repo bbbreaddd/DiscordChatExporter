@@ -49,6 +49,12 @@ public static class DatabaseMessagePatcher
         CancellationToken cancellationToken = default
     )
     {
+        // --- Phase 1: all network I/O, before any write opens a transaction ---
+        // Every write below runs inside the store's single shared WAL transaction, which is held
+        // until FlushAsync. Doing the (slow, rate-limit-prone) network calls first keeps that
+        // transaction -- and thus the database write lock -- from staying open across them, so a
+        // concurrent writer process (e.g. a manual exportguild/fillgaps on the same file) doesn't
+        // block on the lock and time out with SQLITE_BUSY.
         var message = await discord.TryGetMessageAsync(
             request.Channel.Id,
             messageId,
@@ -57,18 +63,30 @@ public static class DatabaseMessagePatcher
         if (message is null)
             return new MessagePatchResult(false, "Message no longer exists (deleted).");
 
-        await store.UpsertGuildAsync(request.Guild, cancellationToken);
-        await store.UpsertChannelAsync(request.Channel, cancellationToken);
-
         var context = new ExportContext(discord, request);
         await context.PopulateChannelsAndRolesAsync(cancellationToken);
+
+        foreach (var user in message.GetReferencedUsers())
+            await context.PopulateMemberAsync(user, cancellationToken);
+
+        var enrichedMessage = await ChannelExporter.EnrichReactionsWithUsersAsync(
+            discord,
+            request.Channel.Id,
+            message,
+            cancellationToken
+        );
+
+        // --- Phase 2: writes only (no network), then flush ---
+        // Ordered to satisfy the foreign keys (foreign_keys = ON): guild -> channel -> role ->
+        // user -> message. The member/role lookups below just read the context populated above.
+        await store.UpsertGuildAsync(request.Guild, cancellationToken);
+        await store.UpsertChannelAsync(request.Channel, cancellationToken);
 
         foreach (var role in context.Roles.Values)
             await store.UpsertRoleAsync(role, request.Guild.Id, cancellationToken);
 
         foreach (var user in message.GetReferencedUsers())
         {
-            await context.PopulateMemberAsync(user, cancellationToken);
             var member = context.TryGetMember(user.Id);
 
             await store.UpsertUserAsync(
@@ -78,13 +96,6 @@ public static class DatabaseMessagePatcher
                 cancellationToken
             );
         }
-
-        var enrichedMessage = await ChannelExporter.EnrichReactionsWithUsersAsync(
-            discord,
-            request.Channel.Id,
-            message,
-            cancellationToken
-        );
 
         await store.UpsertMessageAsync(request.Channel.Id, enrichedMessage, cancellationToken);
         await store.FlushAsync(cancellationToken);

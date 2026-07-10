@@ -225,6 +225,10 @@ public class ChannelExporter(DiscordClient discord)
         foreach (var role in context.Roles.Values)
             await databaseStore.UpsertRoleAsync(role, request.Guild.Id, cancellationToken);
 
+        // Commit the channel metadata + roles now so the transaction (and the SQLite write lock)
+        // isn't held open across the first page fetch below.
+        await databaseStore.FlushAsync(cancellationToken);
+
         var messages = !request.IsReverseMessageOrder
             ? discord.GetMessagesAsync(
                 request.Channel.Id,
@@ -243,68 +247,125 @@ public class ChannelExporter(DiscordClient discord)
 
         var maxMessageId = storedState?.LastMessageId;
 
-        await foreach (var message in messages)
+        // Preserves the original per-message failure semantics: any non-cancellation error while
+        // processing a message aborts *this channel's* export (the caller then moves on to the
+        // next channel), escalating to fatal only if the inner exception already was.
+        DiscordChatExporterException WrapMessageFailure(Message message, Exception ex) =>
+            new(
+                $"Failed to export message #{message.Id} "
+                    + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
+                    + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
+                ex is DiscordChatExporterException dex && dex.IsFatal,
+                ex
+            );
+
+        // Process messages in batches so the write transaction only ever spans a batch of pure
+        // database writes, never a network call. Each batch does all its (rate-limit-prone)
+        // network I/O first -- pagination, member fetches, reactor enrichment -- with no
+        // transaction open, then writes the batch and flushes. This keeps the SQLite write lock
+        // off the network path, which is what let a concurrent writer process (the live watcher,
+        // or a manual fillgaps) block on the lock and time out with SQLITE_BUSY.
+        const int batchSize = 100;
+        await using var enumerator = messages.GetAsyncEnumerator(cancellationToken);
+        var batch = new List<Message>(batchSize);
+        var reachedEnd = false;
+
+        while (!reachedEnd)
         {
-            try
+            batch.Clear();
+            while (batch.Count < batchSize)
             {
-                foreach (var user in message.GetReferencedUsers())
+                if (!await enumerator.MoveNextAsync())
                 {
-                    await context.PopulateMemberAsync(user, cancellationToken);
-                    var member = context.TryGetMember(user.Id);
-
-                    await databaseStore.UpsertUserAsync(
-                        user,
-                        member,
-                        context.GetUserRoles(user.Id),
-                        cancellationToken
-                    );
+                    reachedEnd = true;
+                    break;
                 }
+                batch.Add(enumerator.Current);
+            }
 
-                if (request.MessageFilter.IsMatch(message))
+            if (batch.Count == 0)
+                break;
+
+            // Phase 1: network only (no transaction held). Referenced-user members are fetched
+            // for every message (matched or not, mirroring the original), while only matched
+            // messages are enriched and marked for writing.
+            var prepared = new List<(Message Message, bool IsMatch, Message Enriched)>(batch.Count);
+            foreach (var message in batch)
+            {
+                try
                 {
+                    foreach (var user in message.GetReferencedUsers())
+                        await context.PopulateMemberAsync(user, cancellationToken);
+
+                    var isMatch = request.MessageFilter.IsMatch(message);
+
                     // Reactor lists cost one paginated request per unique emoji per message, so
                     // they're only fetched when explicitly asked for (--enrich-reactors). A bulk
                     // catch-up/rescrape leaves them off and keeps just emoji+count; the live watch
                     // path records reactors from the gateway (MESSAGE_REACTION_ADD) for free.
-                    var enrichedMessage = request.EnrichReactors
-                        ? await EnrichReactionsWithUsersAsync(
-                            discord,
-                            request.Channel.Id,
-                            message,
-                            cancellationToken
-                        )
-                        : message;
+                    var enrichedMessage =
+                        isMatch && request.EnrichReactors
+                            ? await EnrichReactionsWithUsersAsync(
+                                discord,
+                                request.Channel.Id,
+                                message,
+                                cancellationToken
+                            )
+                            : message;
 
-                    await databaseStore.UpsertMessageAsync(
-                        request.Channel.Id,
-                        enrichedMessage,
-                        cancellationToken
-                    );
-
-                    if (maxMessageId is null || message.Id > maxMessageId.Value)
-                        maxMessageId = message.Id;
+                    prepared.Add((message, isMatch, enrichedMessage));
+                }
+                catch (OperationCanceledException)
+                {
+                    throw; // always propagate cancellation
+                }
+                catch (Exception ex)
+                {
+                    throw WrapMessageFailure(message, ex);
                 }
             }
-            catch (OperationCanceledException)
+
+            // Phase 2: writes only (no network). Users are upserted before messages to satisfy
+            // the foreign keys. Then flush, releasing the write lock before the next page fetch.
+            foreach (var (message, isMatch, enrichedMessage) in prepared)
             {
-                throw; // always propagate cancellation
+                try
+                {
+                    foreach (var user in message.GetReferencedUsers())
+                    {
+                        var member = context.TryGetMember(user.Id);
+
+                        await databaseStore.UpsertUserAsync(
+                            user,
+                            member,
+                            context.GetUserRoles(user.Id),
+                            cancellationToken
+                        );
+                    }
+
+                    if (isMatch)
+                    {
+                        await databaseStore.UpsertMessageAsync(
+                            request.Channel.Id,
+                            enrichedMessage,
+                            cancellationToken
+                        );
+
+                        if (maxMessageId is null || message.Id > maxMessageId.Value)
+                            maxMessageId = message.Id;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw; // always propagate cancellation
+                }
+                catch (Exception ex)
+                {
+                    throw WrapMessageFailure(message, ex);
+                }
             }
-            catch (Exception ex)
-            {
-                // A plain (non-DiscordChatExporterException) failure here is usually a transient
-                // network hiccup (e.g. a cut-off HTTP response) -- one bad message must not be
-                // fatal to a run spanning tens of thousands of channels/threads. Only escalate if
-                // the underlying exception was already explicitly marked fatal (auth failure,
-                // unrecognized HTTP error, ...); everything else just fails this one channel and
-                // lets the caller move on to the next.
-                throw new DiscordChatExporterException(
-                    $"Failed to export message #{message.Id} "
-                        + $"in channel '{request.Channel.Name}' (#{request.Channel.Id}) "
-                        + $"of guild '{request.Guild.Name} (#{request.Guild.Id})'.",
-                    ex is DiscordChatExporterException dex && dex.IsFatal,
-                    ex
-                );
-            }
+
+            await databaseStore.FlushAsync(cancellationToken);
         }
 
         await databaseStore.UpdateChannelExportStateAsync(
