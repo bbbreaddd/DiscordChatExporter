@@ -42,5 +42,6 @@ public record WatchSettings
     // Backup + FullScan are per-server; Notifications is process-wide (one bot watches one server).
     public BackupConfig Backup { get; init; } = new();
     public FullScanConfig FullScan { get; init; } = new();
+    public VacuumConfig Vacuum { get; init; } = new();
     public NotificationConfig Notifications { get; init; } = new();
 }

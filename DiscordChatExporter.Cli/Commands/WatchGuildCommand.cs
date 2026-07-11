@@ -1244,6 +1244,65 @@ public partial class WatchGuildCommand : DiscordCommandBase
             }
         }
 
+        // A scheduled VACUUM to reclaim free space, run in-process through the shared store so it
+        // serializes with live capture (writes queue in memory for the duration) instead of fighting
+        // it for the database lock.
+        async Task RunVacuumJobAsync(CancellationToken jobToken)
+        {
+            var cfg = _settings.Vacuum;
+            var mode = cfg.Incremental ? "incremental" : "full";
+            long beforeBytes = 0;
+            try
+            {
+                beforeBytes = new FileInfo(OutputPath).Length;
+            }
+            catch
+            {
+                // Size is only for the log line; ignore if the file can't be stat'd.
+            }
+
+            lock (console)
+                console.Output.WriteLine(
+                    $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [vacuum] Starting {mode} vacuum..."
+                );
+
+            var started = DateTimeOffset.UtcNow;
+            try
+            {
+                await store.VacuumAsync(cfg.Incremental, jobToken);
+
+                long afterBytes = beforeBytes;
+                try
+                {
+                    afterBytes = new FileInfo(OutputPath).Length;
+                }
+                catch
+                {
+                    // ignored
+                }
+
+                var secs = (DateTimeOffset.UtcNow - started).TotalSeconds;
+                var afterMb = afterBytes / 1024d / 1024d;
+                var reclaimedMb = (beforeBytes - afterBytes) / 1024d / 1024d;
+                lock (console)
+                    console.Output.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [vacuum] Done in {secs:F0}s: "
+                            + $"{afterMb:F1} MB (reclaimed {reclaimedMb:F1} MB)."
+                    );
+            }
+            catch (OperationCanceledException) when (jobToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                lock (console)
+                    console.Error.WriteLine(
+                        $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss}] [vacuum] Vacuum FAILED: {ex.Message}"
+                    );
+            }
+        }
+
         // A scheduled full re-scan of the in-scope channels/threads, to reconcile edits/reactions on
         // already-stored messages that catch-up can't see. Runs in-process through the shared store,
         // so it serializes cleanly with live capture (no cross-process "database is locked").
@@ -1347,6 +1406,10 @@ public partial class WatchGuildCommand : DiscordCommandBase
         if (_settings.FullScan.Enabled)
             scheduledJobs.Add(
                 new CronScheduler.Job("full-scan", _settings.FullScan.Schedule, RunFullScanJobAsync)
+            );
+        if (_settings.Vacuum.Enabled)
+            scheduledJobs.Add(
+                new CronScheduler.Job("vacuum", _settings.Vacuum.Schedule, RunVacuumJobAsync)
             );
 
         var scheduler = new CronScheduler(

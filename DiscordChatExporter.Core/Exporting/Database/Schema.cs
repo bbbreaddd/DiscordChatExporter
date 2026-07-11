@@ -427,4 +427,127 @@ internal static class Schema
         CREATE INDEX IF NOT EXISTS message_gap_channel ON message_gap(channel_id);
         CREATE INDEX IF NOT EXISTS message_gap_unfilled ON message_gap(id) WHERE filled_at IS NULL;
         """;
+
+    // Disk-footprint migration (the first one that reshapes existing data rather than only adding
+    // to it -- reduces a large file by ~a third). It is written to be safe under the runner's
+    // foreign_keys=ON transaction:
+    //   * message columns are changed with ALTER ADD/UPDATE/DROP/RENAME COLUMN, which rewrite the
+    //     table in place (rowids and child FKs preserved) -- NOT a parent-table DROP, so the
+    //     implicit-delete cascade that would wipe child rows never happens.
+    //   * junction tables are children (nothing references them), so rebuilding them WITHOUT ROWID
+    //     is safe with FKs on.
+    //   * the edit-history trigger is dropped first because it references message.edited_timestamp
+    //     (which blocks DROP COLUMN) and recreated verbatim at the end.
+    //   * the FTS sync triggers (message_ai/au/ad) are ALSO dropped first: the bulk `UPDATE message`
+    //     statements below would otherwise fire message_au once per row (5M+ delete+reinsert churns
+    //     into the FTS index -- hugely slow and it bloats message_fts_data by hundreds of MB).
+    //     V16 never touches message.content, so the FTS index stays valid; we just recreate the
+    //     triggers verbatim at the end so future writes keep it in sync.
+    // Timestamps become INTEGER epoch-ms; message.timestamp uses the exact snowflake identity
+    // (id >> 22) + 1420070400000. reference_json is normalized into ref_type/ref_message_id/
+    // ref_channel_id/ref_guild_id. FTS content is deliberately left untouched (search unchanged).
+    public const string V16 = """
+        DROP TRIGGER message_ai;
+        DROP TRIGGER message_au;
+        DROP TRIGGER message_ad;
+        DROP TRIGGER message_edit_history_ai;
+
+        ALTER TABLE message ADD COLUMN ref_type       TEXT;
+        ALTER TABLE message ADD COLUMN ref_message_id INTEGER;
+        ALTER TABLE message ADD COLUMN ref_channel_id INTEGER;
+        ALTER TABLE message ADD COLUMN ref_guild_id   INTEGER;
+        UPDATE message SET
+            ref_type       = json_extract(reference_json, '$.type'),
+            ref_message_id = CAST(json_extract(reference_json, '$.messageId') AS INTEGER),
+            ref_channel_id = CAST(json_extract(reference_json, '$.channelId') AS INTEGER),
+            ref_guild_id   = CAST(json_extract(reference_json, '$.guildId')   AS INTEGER)
+        WHERE reference_json IS NOT NULL;
+        ALTER TABLE message DROP COLUMN reference_json;
+
+        DROP INDEX message_channel_ts;
+        ALTER TABLE message ADD COLUMN timestamp_ms INTEGER;
+        UPDATE message SET timestamp_ms = (id >> 22) + 1420070400000;
+        ALTER TABLE message DROP COLUMN timestamp;
+        ALTER TABLE message RENAME COLUMN timestamp_ms TO timestamp;
+        CREATE INDEX message_channel_ts ON message(channel_id, timestamp);
+
+        ALTER TABLE message ADD COLUMN edited_ms INTEGER;
+        UPDATE message SET edited_ms =
+            CAST(round((julianday(edited_timestamp) - 2440587.5) * 86400000) AS INTEGER)
+        WHERE edited_timestamp IS NOT NULL;
+        ALTER TABLE message DROP COLUMN edited_timestamp;
+        ALTER TABLE message RENAME COLUMN edited_ms TO edited_timestamp;
+
+        ALTER TABLE message ADD COLUMN call_ended_ms INTEGER;
+        UPDATE message SET call_ended_ms =
+            CAST(round((julianday(call_ended_timestamp) - 2440587.5) * 86400000) AS INTEGER)
+        WHERE call_ended_timestamp IS NOT NULL;
+        ALTER TABLE message DROP COLUMN call_ended_timestamp;
+        ALTER TABLE message RENAME COLUMN call_ended_ms TO call_ended_timestamp;
+
+        ALTER TABLE message_edit_history ADD COLUMN edited_ms INTEGER;
+        UPDATE message_edit_history SET edited_ms =
+            CAST(round((julianday(edited_timestamp) - 2440587.5) * 86400000) AS INTEGER)
+        WHERE edited_timestamp IS NOT NULL;
+        ALTER TABLE message_edit_history DROP COLUMN edited_timestamp;
+        ALTER TABLE message_edit_history RENAME COLUMN edited_ms TO edited_timestamp;
+
+        CREATE TABLE message_mention_new (
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, user_id)
+        ) WITHOUT ROWID;
+        INSERT INTO message_mention_new SELECT message_id, user_id FROM message_mention;
+        DROP TABLE message_mention;
+        ALTER TABLE message_mention_new RENAME TO message_mention;
+        CREATE INDEX message_mention_user ON message_mention(user_id);
+
+        CREATE TABLE message_role_mention_new (
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            role_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, role_id)
+        ) WITHOUT ROWID;
+        INSERT INTO message_role_mention_new SELECT message_id, role_id FROM message_role_mention;
+        DROP TABLE message_role_mention;
+        ALTER TABLE message_role_mention_new RENAME TO message_role_mention;
+        CREATE INDEX message_role_mention_role ON message_role_mention(role_id);
+
+        CREATE TABLE message_channel_mention_new (
+            message_id INTEGER NOT NULL REFERENCES message(id) ON DELETE CASCADE,
+            channel_id INTEGER NOT NULL,
+            PRIMARY KEY (message_id, channel_id)
+        ) WITHOUT ROWID;
+        INSERT INTO message_channel_mention_new SELECT message_id, channel_id FROM message_channel_mention;
+        DROP TABLE message_channel_mention;
+        ALTER TABLE message_channel_mention_new RENAME TO message_channel_mention;
+        CREATE INDEX message_channel_mention_channel ON message_channel_mention(channel_id);
+
+        CREATE TABLE thread_member_new (
+            channel_id INTEGER NOT NULL REFERENCES channel(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL,
+            join_timestamp TEXT NOT NULL,
+            flags INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (channel_id, user_id)
+        ) WITHOUT ROWID;
+        INSERT INTO thread_member_new SELECT channel_id, user_id, join_timestamp, flags FROM thread_member;
+        DROP TABLE thread_member;
+        ALTER TABLE thread_member_new RENAME TO thread_member;
+        CREATE INDEX thread_member_user ON thread_member(user_id);
+
+        CREATE TRIGGER message_ai AFTER INSERT ON message BEGIN
+            INSERT INTO message_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER message_ad AFTER DELETE ON message BEGIN
+            INSERT INTO message_fts(message_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        END;
+        CREATE TRIGGER message_au AFTER UPDATE ON message BEGIN
+            INSERT INTO message_fts(message_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            INSERT INTO message_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER message_edit_history_ai AFTER UPDATE OF content ON message
+            WHEN OLD.content != NEW.content BEGIN
+            INSERT INTO message_edit_history (message_id, content, edited_timestamp, recorded_at)
+            VALUES (OLD.id, OLD.content, OLD.edited_timestamp, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+        """;
 }

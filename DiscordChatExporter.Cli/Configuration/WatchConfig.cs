@@ -31,6 +31,24 @@ public record ServerConfig
     public ExcludeConfig Exclude { get; init; } = new();
     public BackupConfig Backup { get; init; } = new();
     public FullScanConfig FullScan { get; init; } = new();
+    public VacuumConfig Vacuum { get; init; } = new();
+}
+
+// Scheduled database VACUUM to reclaim free space. Runs in-process on the shared writer connection
+// (see SqliteExportStore.VacuumAsync), so it serializes with live capture rather than racing it.
+// Off by default: a full VACUUM briefly pauses live writes (they queue in memory) while it rewrites
+// the file, and needs transient free disk roughly equal to the database size. Incremental mode is
+// far lighter but only returns freelist pages and only when the DB is in auto_vacuum=INCREMENTAL.
+public record VacuumConfig
+{
+    public bool Enabled { get; init; }
+
+    // Standard 5-field cron, evaluated in the container timezone. Default weekly, Sunday 06:00 --
+    // after the 05:30 backup, so the weekly copy captures the pre-vacuum state.
+    public string Schedule { get; init; } = "0 6 * * 0";
+
+    // false = full VACUUM (rewrite + defragment); true = PRAGMA incremental_vacuum (freelist only).
+    public bool Incremental { get; init; }
 }
 
 // Scheduled online backup of this server's database. Runs on a cron schedule inside the watcher via a

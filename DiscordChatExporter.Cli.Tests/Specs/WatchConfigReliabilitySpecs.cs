@@ -155,6 +155,101 @@ public class WatchConfigReliabilitySpecs
         config.Notifications.Enabled.Should().BeFalse();
         config.Servers[0].Backup.Enabled.Should().BeFalse();
         config.Servers[0].FullScan.Enabled.Should().BeFalse();
+        config.Servers[0].Vacuum.Enabled.Should().BeFalse();
+    }
+
+    [Fact]
+    public void I_can_parse_the_vacuum_section()
+    {
+        var config = Load(
+            """
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+                vacuum:
+                  enabled: true
+                  schedule: "0 4 * * 1"
+                  incremental: true
+            """
+        );
+
+        var vacuum = config.Servers[0].Vacuum;
+        vacuum.Enabled.Should().BeTrue();
+        vacuum.Schedule.Should().Be("0 4 * * 1");
+        vacuum.Incremental.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Vacuum_defaults_to_a_disabled_full_weekly_run()
+    {
+        var config = Load(
+            """
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+            """
+        );
+
+        var vacuum = config.Servers[0].Vacuum;
+        vacuum.Enabled.Should().BeFalse();
+        vacuum.Incremental.Should().BeFalse();
+        vacuum.Schedule.Should().Be("0 6 * * 0");
+    }
+
+    [Fact]
+    public void Defaults_vacuum_block_is_inherited_by_a_server()
+    {
+        var config = Load(
+            """
+            defaults:
+              vacuum:
+                enabled: true
+                incremental: true
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+            """
+        );
+
+        config.Servers[0].Vacuum.Enabled.Should().BeTrue();
+        config.Servers[0].Vacuum.Incremental.Should().BeTrue();
+    }
+
+    [Fact]
+    public void An_invalid_vacuum_cron_is_rejected()
+    {
+        LoadShouldThrow(
+            """
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+                vacuum:
+                  enabled: true
+                  schedule: "not a cron"
+            """,
+            "the cron expression is invalid"
+        );
+    }
+
+    [Fact]
+    public void An_unknown_key_in_the_vacuum_block_is_rejected()
+    {
+        LoadShouldThrow(
+            """
+            servers:
+              - name: Test
+                id: 123456789012345678
+                output: /data/test.db
+                vacuum:
+                  enabled: true
+                  frequency: daily
+            """,
+            "unknown keys should fail loudly"
+        );
     }
 
     [Fact]

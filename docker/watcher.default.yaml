@@ -97,6 +97,17 @@ defaults:
     media: true # false suppresses media store-wide for the scan's duration
     # full-scan exports share behavior.catch-up-parallel; no separate parallelism knob.
 
+  # Scheduled VACUUM to reclaim free space in the database file. Runs in-process on the shared
+  # connection, so it serializes with live capture (events queue in memory while it runs). Disabled
+  # by default: a full vacuum briefly pauses writes while it rewrites the file and needs transient
+  # free disk ~= the database size -- reasons you might not want it running unattended.
+  vacuum:
+    enabled: false
+    schedule: "0 6 * * 0" # cron in container TZ; weekly, Sun 06:00 (after the 05:30 backup)
+    incremental: false # false = full VACUUM (rewrite + defragment, max reclaim).
+      # true = PRAGMA incremental_vacuum: much lighter, but only returns
+      # freelist pages and only if the DB is in auto_vacuum=INCREMENTAL mode.
+
 servers:
   - name: MyServer
     id: REPLACE_WITH_SERVER_ID # your server (guild) id

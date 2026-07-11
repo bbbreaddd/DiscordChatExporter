@@ -65,6 +65,7 @@ public partial class WatchCommand : DiscordCommandBase
             ExcludeThreads = server.Exclude.Threads,
             Backup = server.Backup,
             FullScan = server.FullScan,
+            Vacuum = server.Vacuum,
             Notifications = config.Notifications,
         };
 

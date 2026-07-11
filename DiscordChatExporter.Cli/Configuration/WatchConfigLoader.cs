@@ -48,7 +48,7 @@ public static class WatchConfigLoader
             RequireKnownKeys(
                 defaults,
                 "defaults",
-                ["media", "data", "behavior", "exclude", "backup", "full-scan"]
+                ["media", "data", "behavior", "exclude", "backup", "full-scan", "vacuum"]
             );
 
         var serversSeq = GetSequence(root, "servers");
@@ -73,6 +73,7 @@ public static class WatchConfigLoader
                     "exclude",
                     "backup",
                     "full-scan",
+                    "vacuum",
                 ]
             );
             servers.Add(ParseServer(srv, defaults, i));
@@ -138,6 +139,7 @@ public static class WatchConfigLoader
         var exclude = ParseExclude(GetMap(defaults, "exclude"), GetMap(srv, "exclude"));
         var backup = ParseBackup(GetMap(defaults, "backup"), GetMap(srv, "backup"), name, id);
         var fullScan = ParseFullScan(GetMap(defaults, "full-scan"), GetMap(srv, "full-scan"), name);
+        var vacuum = ParseVacuum(GetMap(defaults, "vacuum"), GetMap(srv, "vacuum"), name);
 
         // Hard conflict: fetching reactor lists only makes sense if reactions are stored at all.
         if (data.Reactors && !data.Reactions)
@@ -158,6 +160,7 @@ public static class WatchConfigLoader
             Exclude = exclude,
             Backup = backup,
             FullScan = fullScan,
+            Vacuum = vacuum,
         };
     }
 
@@ -340,6 +343,23 @@ public static class WatchConfigLoader
             Compress = GetBool(srv, "compress") ?? GetBool(def, "compress") ?? false,
             IntegrityCheck =
                 GetBool(srv, "integrity-check") ?? GetBool(def, "integrity-check") ?? true,
+        };
+    }
+
+    private static VacuumConfig ParseVacuum(YamlMappingNode? def, YamlMappingNode? srv, string name)
+    {
+        string[] allowed = ["enabled", "schedule", "incremental"];
+        RequireKnownKeys(def, "defaults.vacuum", allowed);
+        RequireKnownKeys(srv, "vacuum", allowed);
+
+        var schedule = GetScalar(srv, "schedule") ?? GetScalar(def, "schedule") ?? "0 6 * * 0";
+        ValidateCron(schedule, $"server '{name}' vacuum.schedule");
+
+        return new VacuumConfig
+        {
+            Enabled = GetBool(srv, "enabled") ?? GetBool(def, "enabled") ?? false,
+            Schedule = schedule,
+            Incremental = GetBool(srv, "incremental") ?? GetBool(def, "incremental") ?? false,
         };
     }
 

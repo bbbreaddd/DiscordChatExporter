@@ -84,13 +84,6 @@ internal record ReactionUserDto(
     string AvatarUrl
 );
 
-internal record MessageReferenceDto(
-    string Type,
-    string? MessageId,
-    string? ChannelId,
-    string? GuildId
-);
-
 internal record MessageSnapshotDto(
     DateTimeOffset Timestamp,
     DateTimeOffset? TimestampEdited,
@@ -135,7 +128,6 @@ internal record MessageComponentDto(
 [JsonSerializable(typeof(EmbedDto[]))]
 [JsonSerializable(typeof(StickerDto[]))]
 [JsonSerializable(typeof(ReactionUserDto[]))]
-[JsonSerializable(typeof(MessageReferenceDto))]
 [JsonSerializable(typeof(MessageSnapshotDto))]
 [JsonSerializable(typeof(InteractionDto))]
 [JsonSerializable(typeof(EmojiDto[]))]
@@ -262,14 +254,6 @@ internal static class DatabaseJson
     public static StickerDto MapSticker(Sticker sticker) =>
         new(sticker.Id.ToString(), sticker.Name, sticker.Format.ToString(), sticker.SourceUrl);
 
-    public static MessageReferenceDto MapReference(MessageReference reference) =>
-        new(
-            reference.Kind.ToString(),
-            reference.MessageId?.ToString(),
-            reference.ChannelId?.ToString(),
-            reference.GuildId?.ToString()
-        );
-
     public static MessageSnapshotDto MapForwardedMessage(MessageSnapshot snapshot) =>
         new(
             snapshot.Timestamp,
@@ -323,11 +307,6 @@ internal static class DatabaseJson
 
     // Returns a value suitable for direct use as a SqliteParameter value: DBNull.Value for a
     // null input, otherwise the serialized JSON string (boxed as object to match either case).
-    public static object ToDbParam(MessageReferenceDto? value) =>
-        value is null
-            ? DBNull.Value
-            : JsonSerializer.Serialize(value, DatabaseJsonContext.Default.MessageReferenceDto);
-
     public static object ToDbParam(MessageSnapshotDto? value) =>
         value is null
             ? DBNull.Value

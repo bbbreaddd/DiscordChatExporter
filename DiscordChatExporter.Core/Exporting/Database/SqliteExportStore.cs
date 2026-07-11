@@ -111,6 +111,11 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 PRAGMA synchronous = NORMAL;
                 PRAGMA foreign_keys = ON;
                 PRAGMA busy_timeout = 30000;
+                -- Footprint/throughput tuning (none change on-disk format):
+                PRAGMA cache_size = -262144;          -- 256 MiB page cache (SQLite default is ~2 MiB)
+                PRAGMA mmap_size = 1073741824;         -- up to 1 GiB memory-mapped reads
+                PRAGMA temp_store = MEMORY;            -- keep temp b-trees/sorts off disk
+                PRAGMA journal_size_limit = 67108864;  -- truncate the WAL back to 64 MiB after checkpoints
                 """;
             await pragmas.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -144,6 +149,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (13, Schema.V13),
         (14, Schema.V14),
         (15, Schema.V15),
+        (16, Schema.V16),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -252,6 +258,42 @@ public sealed class SqliteExportStore : IAsyncDisposable
         }
     }
 
+    // Reclaims free space in the database file. Holds _lock for the whole operation, so it serializes
+    // with live capture: writes queue (in memory) until it finishes. Any pending write batch is
+    // committed first because VACUUM cannot run inside a transaction.
+    //   * incremental == false: a full VACUUM -- rewrites and defragments the entire file (maximum
+    //     reclaim, but rewrites the whole DB and needs transient free disk ~= the DB size).
+    //   * incremental == true: PRAGMA incremental_vacuum -- returns only freelist pages to the OS.
+    //     Much lighter, but reclaims nothing unless the DB is in auto_vacuum=INCREMENTAL mode.
+    // A truncating WAL checkpoint follows so the on-disk file actually shrinks and the WAL is reset.
+    public async ValueTask VacuumAsync(
+        bool incremental,
+        CancellationToken cancellationToken = default
+    )
+    {
+        await _lock.WaitAsync(cancellationToken);
+        try
+        {
+            await FlushCoreAsync(cancellationToken);
+
+            await using (var command = _connection.CreateCommand())
+            {
+                command.CommandText = incremental ? "PRAGMA incremental_vacuum;" : "VACUUM;";
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var checkpoint = _connection.CreateCommand())
+            {
+                checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                await checkpoint.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
     private static long ToDbId(Snowflake snowflake) => (long)snowflake.Value;
 
     private static object ToDbId(Snowflake? snowflake) =>
@@ -262,6 +304,8 @@ public sealed class SqliteExportStore : IAsyncDisposable
     private static object OrNull(string? value) => (object?)value ?? DBNull.Value;
 
     private static object OrNull(int? value) => (object?)value ?? DBNull.Value;
+
+    private static object OrNull(long? value) => (object?)value ?? DBNull.Value;
 
     private record PendingMedia(
         string OwnerKind,
@@ -1371,12 +1415,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 """
                 INSERT INTO message (
                     id, channel_id, author_id, kind, timestamp, edited_timestamp,
-                    call_ended_timestamp, is_pinned, content, reference_json,
+                    call_ended_timestamp, is_pinned, content,
+                    ref_type, ref_message_id, ref_channel_id, ref_guild_id,
                     forwarded_message_json, interaction_json, embeds_json, stickers_json,
                     inline_emojis_json, webhook_id, poll_json, components_json, components_raw_json
                 ) VALUES (
                     $id, $channelId, $authorId, $kind, $timestamp, $editedTimestamp,
-                    $callEndedTimestamp, $isPinned, $content, $referenceJson,
+                    $callEndedTimestamp, $isPinned, $content,
+                    $refType, $refMessageId, $refChannelId, $refGuildId,
                     $forwardedMessageJson, $interactionJson, $embedsJson, $stickersJson,
                     $inlineEmojisJson, $webhookId, $pollJson, $componentsJson, $componentsRawJson
                 )
@@ -1389,7 +1435,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     call_ended_timestamp = excluded.call_ended_timestamp,
                     is_pinned = excluded.is_pinned,
                     content = excluded.content,
-                    reference_json = excluded.reference_json,
+                    ref_type = excluded.ref_type,
+                    ref_message_id = excluded.ref_message_id,
+                    ref_channel_id = excluded.ref_channel_id,
+                    ref_guild_id = excluded.ref_guild_id,
                     forwarded_message_json = excluded.forwarded_message_json,
                     interaction_json = excluded.interaction_json,
                     embeds_json = excluded.embeds_json,
@@ -1409,24 +1458,24 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$kind", message.Kind.ToString());
             command.Parameters.AddWithValue(
                 "$timestamp",
-                message.Timestamp.ToString("O", CultureInfo.InvariantCulture)
+                message.Timestamp.ToUnixTimeMilliseconds()
             );
             command.Parameters.AddWithValue(
                 "$editedTimestamp",
-                OrNull(message.EditedTimestamp?.ToString("O", CultureInfo.InvariantCulture))
+                OrNull(message.EditedTimestamp?.ToUnixTimeMilliseconds())
             );
             command.Parameters.AddWithValue(
                 "$callEndedTimestamp",
-                OrNull(message.CallEndedTimestamp?.ToString("O", CultureInfo.InvariantCulture))
+                OrNull(message.CallEndedTimestamp?.ToUnixTimeMilliseconds())
             );
             command.Parameters.AddWithValue("$isPinned", message.IsPinned ? 1 : 0);
             command.Parameters.AddWithValue("$content", message.Content);
-            command.Parameters.AddWithValue(
-                "$referenceJson",
-                DatabaseJson.ToDbParam(
-                    message.Reference is { } reference ? DatabaseJson.MapReference(reference) : null
-                )
-            );
+            // reference_json was normalized into four columns in V16.
+            var reference = message.Reference;
+            command.Parameters.AddWithValue("$refType", OrNull(reference?.Kind.ToString()));
+            command.Parameters.AddWithValue("$refMessageId", ToDbId(reference?.MessageId));
+            command.Parameters.AddWithValue("$refChannelId", ToDbId(reference?.ChannelId));
+            command.Parameters.AddWithValue("$refGuildId", ToDbId(reference?.GuildId));
             command.Parameters.AddWithValue(
                 "$forwardedMessageJson",
                 DatabaseJson.ToDbParam(

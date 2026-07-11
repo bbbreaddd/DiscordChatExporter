@@ -46,6 +46,17 @@ public class DatabaseMediaSpecs
         return (long)(await command.ExecuteScalarAsync())!;
     }
 
+    private static async Task<string?> ExecuteScalarStringAsync(string dbPath, string sql)
+    {
+        await using var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder { DataSource = dbPath }.ToString()
+        );
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (await command.ExecuteScalarAsync()) as string;
+    }
+
     private static Message ParseMessage(string attachmentUrl) =>
         Message.Parse(
             JsonDocument
@@ -139,6 +150,121 @@ public class DatabaseMediaSpecs
         await store.UpsertGuildAsync(guild);
         await store.UpsertChannelAsync(channel);
         await store.UpsertUserAsync(user, null, Array.Empty<Role>());
+    }
+
+    [Fact]
+    public async Task Db_stores_message_timestamps_as_epoch_ms_and_normalizes_the_reference()
+    {
+        using var db = TempFile.Create();
+
+        var message = Message.Parse(
+            JsonDocument
+                .Parse(
+                    """
+                    {
+                      "id": "50",
+                      "type": 0,
+                      "content": "reply body",
+                      "channel_id": "300",
+                      "author": {
+                        "id": "1",
+                        "username": "alice",
+                        "discriminator": "0000",
+                        "avatar": null
+                      },
+                      "attachments": [],
+                      "embeds": [],
+                      "pinned": false,
+                      "timestamp": "2023-06-15T12:00:00+00:00",
+                      "edited_timestamp": "2023-06-15T12:05:00+00:00",
+                      "message_reference": {
+                        "type": 0,
+                        "message_id": "40",
+                        "channel_id": "300",
+                        "guild_id": "100"
+                      }
+                    }
+                    """
+                )
+                .RootElement
+        );
+
+        await using (var store = await SqliteExportStore.OpenAsync(db.Path))
+        {
+            await SeedMessageParentsAsync(store);
+            await store.UpsertMessageAsync(new Snowflake(300), message);
+            await store.FlushAsync();
+        }
+
+        // V16 stores timestamps as INTEGER epoch-ms (matching DateTimeOffset.ToUnixTimeMilliseconds).
+        var expectedTs = new DateTimeOffset(
+            2023,
+            6,
+            15,
+            12,
+            0,
+            0,
+            TimeSpan.Zero
+        ).ToUnixTimeMilliseconds();
+        var expectedEdited = new DateTimeOffset(
+            2023,
+            6,
+            15,
+            12,
+            5,
+            0,
+            TimeSpan.Zero
+        ).ToUnixTimeMilliseconds();
+        (await ExecuteScalarLongAsync(db.Path, "SELECT timestamp FROM message WHERE id = 50;"))
+            .Should()
+            .Be(expectedTs);
+        (
+            await ExecuteScalarLongAsync(
+                db.Path,
+                "SELECT edited_timestamp FROM message WHERE id = 50;"
+            )
+        )
+            .Should()
+            .Be(expectedEdited);
+
+        // reference_json was normalized into the ref_* columns.
+        (await ExecuteScalarStringAsync(db.Path, "SELECT ref_type FROM message WHERE id = 50;"))
+            .Should()
+            .Be("Default");
+        (await ExecuteScalarLongAsync(db.Path, "SELECT ref_message_id FROM message WHERE id = 50;"))
+            .Should()
+            .Be(40);
+        (await ExecuteScalarLongAsync(db.Path, "SELECT ref_channel_id FROM message WHERE id = 50;"))
+            .Should()
+            .Be(300);
+        (await ExecuteScalarLongAsync(db.Path, "SELECT ref_guild_id FROM message WHERE id = 50;"))
+            .Should()
+            .Be(100);
+    }
+
+    [Fact]
+    public async Task Db_vacuum_reclaims_space_and_leaves_a_valid_database()
+    {
+        using var db = TempFile.Create();
+
+        await using (var store = await SqliteExportStore.OpenAsync(db.Path))
+        {
+            await SeedMessageParentsAsync(store);
+            // Deliberately not flushed first: VacuumAsync must commit the pending write batch
+            // itself, since VACUUM cannot run inside a transaction.
+            await store.VacuumAsync(incremental: false);
+            // Incremental is a no-op unless the DB is in auto_vacuum=INCREMENTAL mode, but it
+            // must still run cleanly.
+            await store.VacuumAsync(incremental: true);
+        }
+
+        // The file is still a valid, current-schema database and the seeded rows survived.
+        (await ExecuteScalarLongAsync(db.Path, "PRAGMA user_version;"))
+            .Should()
+            .Be(16);
+        (await ExecuteScalarLongAsync(db.Path, "SELECT COUNT(*) FROM guild WHERE id = 100;"))
+            .Should()
+            .Be(1);
     }
 
     [Fact]
