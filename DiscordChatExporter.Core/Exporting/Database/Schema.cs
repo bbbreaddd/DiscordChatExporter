@@ -550,4 +550,73 @@ internal static class Schema
             VALUES (OLD.id, OLD.content, OLD.edited_timestamp, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
         END;
         """;
+
+    public const string V17 = """
+        ALTER TABLE "user" ADD COLUMN global_display_name TEXT;
+        ALTER TABLE "user" ADD COLUMN global_avatar_url TEXT;
+        ALTER TABLE "user" ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE "user" ADD COLUMN flags INTEGER;
+        ALTER TABLE "user" ADD COLUMN public_flags INTEGER;
+        ALTER TABLE "user" ADD COLUMN premium_type INTEGER;
+        ALTER TABLE "user" ADD COLUMN avatar_decoration_url TEXT;
+        ALTER TABLE "user" ADD COLUMN member_flags INTEGER;
+        ALTER TABLE "user" ADD COLUMN member_permissions TEXT;
+
+        ALTER TABLE attachment ADD COLUMN description TEXT;
+
+        ALTER TABLE message ADD COLUMN flags INTEGER;
+        ALTER TABLE message ADD COLUMN interaction_metadata_json TEXT;
+        ALTER TABLE message ADD COLUMN mention_everyone INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE message ADD COLUMN activity_json TEXT;
+        ALTER TABLE message ADD COLUMN application_json TEXT;
+        ALTER TABLE message ADD COLUMN shared_client_theme_json TEXT;
+        ALTER TABLE message ADD COLUMN role_subscription_data_json TEXT;
+
+        ALTER TABLE reaction ADD COLUMN burst_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE reaction ADD COLUMN normal_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE reaction ADD COLUMN me_burst INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE reaction ADD COLUMN burst_colors_json TEXT;
+
+        CREATE TABLE IF NOT EXISTS user_name_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS user_name_history_user ON user_name_history(user_id);
+
+        CREATE TRIGGER IF NOT EXISTS user_name_history_ai AFTER UPDATE OF name ON "user"
+            WHEN OLD.name != NEW.name BEGIN
+            INSERT INTO user_name_history (user_id, name, recorded_at)
+            VALUES (OLD.id, OLD.name, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+
+        CREATE TABLE IF NOT EXISTS user_display_name_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+            display_name TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS user_display_name_history_user ON user_display_name_history(user_id);
+
+        CREATE TRIGGER IF NOT EXISTS user_display_name_history_ai AFTER UPDATE OF display_name ON "user"
+            WHEN OLD.display_name IS NOT NEW.display_name BEGIN
+            INSERT INTO user_display_name_history (user_id, display_name, recorded_at)
+            VALUES (OLD.id, OLD.display_name, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+
+        CREATE TABLE IF NOT EXISTS user_global_display_name_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+            global_display_name TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS user_global_display_name_history_user ON user_global_display_name_history(user_id);
+
+        CREATE TRIGGER IF NOT EXISTS user_global_display_name_history_ai AFTER UPDATE OF global_display_name ON "user"
+            WHEN OLD.global_display_name IS NOT NEW.global_display_name BEGIN
+            INSERT INTO user_global_display_name_history (user_id, global_display_name, recorded_at)
+            VALUES (OLD.id, OLD.global_display_name, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+        """;
 }

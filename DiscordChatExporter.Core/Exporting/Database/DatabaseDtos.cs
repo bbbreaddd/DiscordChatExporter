@@ -47,7 +47,16 @@ internal record UserDto(
     // Global profile banner/accent color -- Discord's guild member object has no per-guild
     // banner, unlike avatar, so there's nothing to prefer over these.
     string? BannerUrl = null,
-    string? AccentColor = null
+    string? AccentColor = null,
+    string? GlobalDisplayName = null,
+    string? GlobalAvatarUrl = null,
+    bool IsSystem = false,
+    int? Flags = null,
+    int? PublicFlags = null,
+    int? PremiumType = null,
+    string? AvatarDecorationUrl = null,
+    int? MemberFlags = null,
+    string? MemberPermissions = null
 );
 
 internal record AttachmentDto(string Id, string Url, string FileName, long FileSizeBytes);
@@ -134,6 +143,7 @@ internal record MessageComponentDto(
 [JsonSerializable(typeof(PollDto))]
 [JsonSerializable(typeof(MessageComponentDto[]))]
 [JsonSerializable(typeof(PermissionOverwriteDto[]))]
+[JsonSerializable(typeof(string[]))]
 internal partial class DatabaseJsonContext : JsonSerializerContext;
 
 internal static class DatabaseJson
@@ -202,7 +212,16 @@ internal static class DatabaseJson
             member?.CommunicationDisabledUntil,
             member?.Pending ?? false,
             user.BannerUrl,
-            ToHex(user.AccentColor)
+            ToHex(user.AccentColor),
+            user.DisplayName,
+            user.AvatarUrl,
+            user.IsSystem,
+            user.Flags,
+            user.PublicFlags,
+            user.PremiumType,
+            member?.AvatarDecorationUrl ?? user.AvatarDecorationUrl,
+            member?.Flags,
+            member?.Permissions
         );
     }
 
@@ -370,4 +389,9 @@ internal static class DatabaseJson
                 values.ToArray(),
                 DatabaseJsonContext.Default.PermissionOverwriteDtoArray
             );
+
+    public static string SerializeBurstColors(IReadOnlyList<string> values) =>
+        values.Count == 0
+            ? "[]"
+            : JsonSerializer.Serialize(values.ToArray(), DatabaseJsonContext.Default.StringArray);
 }

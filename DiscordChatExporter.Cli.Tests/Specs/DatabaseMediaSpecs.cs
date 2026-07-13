@@ -261,7 +261,7 @@ public class DatabaseMediaSpecs
         // The file is still a valid, current-schema database and the seeded rows survived.
         (await ExecuteScalarLongAsync(db.Path, "PRAGMA user_version;"))
             .Should()
-            .Be(16);
+            .Be(17);
         (await ExecuteScalarLongAsync(db.Path, "SELECT COUNT(*) FROM guild WHERE id = 100;"))
             .Should()
             .Be(1);

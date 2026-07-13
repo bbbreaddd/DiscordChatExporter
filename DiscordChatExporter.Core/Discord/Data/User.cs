@@ -21,7 +21,12 @@ public partial record User(
     // banner/accent color. Only present on a full user fetch (message author, direct
     // GET user/{id}), not on the cut-down user object embedded elsewhere.
     string? BannerUrl = null,
-    Color? AccentColor = null
+    Color? AccentColor = null,
+    bool IsSystem = false,
+    int? Flags = null,
+    int? PublicFlags = null,
+    int? PremiumType = null,
+    string? AvatarDecorationUrl = null
 ) : IHasId
 {
     public string DiscriminatorFormatted { get; } =
@@ -67,6 +72,15 @@ public partial record User
             .WithFullAlpha()
             .NullIf(c => c.ToRgb() <= 0);
 
+        var isSystem = json.GetPropertyOrNull("system")?.GetBooleanOrNull() ?? false;
+        var flags = json.GetPropertyOrNull("flags")?.GetInt32OrNull();
+        var publicFlags = json.GetPropertyOrNull("public_flags")?.GetInt32OrNull();
+        var premiumType = json.GetPropertyOrNull("premium_type")?.GetInt32OrNull();
+        var avatarDecorationUrl = json.GetPropertyOrNull("avatar_decoration_data")
+            ?.GetPropertyOrNull("asset")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => $"https://cdn.discordapp.com/avatar-decorations/{id}/{h}.png");
+
         return new User(
             id,
             isBot,
@@ -75,7 +89,12 @@ public partial record User
             displayName,
             avatarUrl,
             bannerUrl,
-            accentColor
+            accentColor,
+            isSystem,
+            flags,
+            publicFlags,
+            premiumType,
+            avatarDecorationUrl
         );
     }
 }

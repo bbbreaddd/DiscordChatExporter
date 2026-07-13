@@ -150,6 +150,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
         (14, Schema.V14),
         (15, Schema.V15),
         (16, Schema.V16),
+        (17, Schema.V17),
     ];
 
     private async Task MigrateAsync(CancellationToken cancellationToken)
@@ -1179,7 +1180,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             userId,
             "avatars",
             dto.AvatarUrl,
-            keepHistory: false,
+            keepHistory: true,
             cancellationToken
         );
         var bannerMedia = await TryDownloadMediaAsync(
@@ -1187,7 +1188,7 @@ public sealed class SqliteExportStore : IAsyncDisposable
             userId,
             "user-banners",
             dto.BannerUrl,
-            keepHistory: false,
+            keepHistory: true,
             cancellationToken
         );
 
@@ -1201,11 +1202,15 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 INSERT INTO "user" (
                     id, is_bot, discriminator, name, display_name, color, avatar_url, roles_json,
                     joined_at, premium_since, communication_disabled_until, pending,
-                    banner_url, accent_color
+                    banner_url, accent_color,
+                    global_display_name, global_avatar_url, is_system, flags, public_flags,
+                    premium_type, avatar_decoration_url, member_flags, member_permissions
                 ) VALUES (
                     $id, $isBot, $discriminator, $name, $displayName, $color, $avatarUrl, $rolesJson,
                     $joinedAt, $premiumSince, $communicationDisabledUntil, $pending,
-                    $bannerUrl, $accentColor
+                    $bannerUrl, $accentColor,
+                    $globalDisplayName, $globalAvatarUrl, $isSystem, $flags, $publicFlags,
+                    $premiumType, $avatarDecorationUrl, $memberFlags, $memberPermissions
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     -- Always-current user-level fields.
@@ -1214,6 +1219,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     name = excluded.name,
                     banner_url = excluded.banner_url,
                     accent_color = excluded.accent_color,
+                    global_display_name = excluded.global_display_name,
+                    global_avatar_url = excluded.global_avatar_url,
+                    is_system = excluded.is_system,
+                    flags = excluded.flags,
+                    public_flags = excluded.public_flags,
+                    premium_type = excluded.premium_type,
+                    avatar_decoration_url = excluded.avatar_decoration_url,
                     -- Member-derived fields: only overwrite when the caller actually had member
                     -- info; otherwise keep whatever a previous real sighting stored.
                     display_name = CASE WHEN $hasMember = 1 THEN excluded.display_name ELSE "user".display_name END,
@@ -1223,7 +1235,9 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     joined_at = CASE WHEN $hasMember = 1 THEN excluded.joined_at ELSE "user".joined_at END,
                     premium_since = CASE WHEN $hasMember = 1 THEN excluded.premium_since ELSE "user".premium_since END,
                     communication_disabled_until = CASE WHEN $hasMember = 1 THEN excluded.communication_disabled_until ELSE "user".communication_disabled_until END,
-                    pending = CASE WHEN $hasMember = 1 THEN excluded.pending ELSE "user".pending END;
+                    pending = CASE WHEN $hasMember = 1 THEN excluded.pending ELSE "user".pending END,
+                    member_flags = CASE WHEN $hasMember = 1 THEN excluded.member_flags ELSE "user".member_flags END,
+                    member_permissions = CASE WHEN $hasMember = 1 THEN excluded.member_permissions ELSE "user".member_permissions END;
                 """
             );
             command.Parameters.AddWithValue("$id", ToDbId(userId));
@@ -1249,6 +1263,18 @@ public sealed class SqliteExportStore : IAsyncDisposable
             command.Parameters.AddWithValue("$pending", dto.Pending ? 1 : 0);
             command.Parameters.AddWithValue("$bannerUrl", OrNull(dto.BannerUrl));
             command.Parameters.AddWithValue("$accentColor", OrNull(dto.AccentColor));
+            command.Parameters.AddWithValue("$globalDisplayName", OrNull(dto.GlobalDisplayName));
+            command.Parameters.AddWithValue("$globalAvatarUrl", OrNull(dto.GlobalAvatarUrl));
+            command.Parameters.AddWithValue("$isSystem", dto.IsSystem ? 1 : 0);
+            command.Parameters.AddWithValue("$flags", OrNull(dto.Flags));
+            command.Parameters.AddWithValue("$publicFlags", OrNull(dto.PublicFlags));
+            command.Parameters.AddWithValue("$premiumType", OrNull(dto.PremiumType));
+            command.Parameters.AddWithValue(
+                "$avatarDecorationUrl",
+                OrNull(dto.AvatarDecorationUrl)
+            );
+            command.Parameters.AddWithValue("$memberFlags", OrNull(dto.MemberFlags));
+            command.Parameters.AddWithValue("$memberPermissions", OrNull(dto.MemberPermissions));
             command.Parameters.AddWithValue("$hasMember", hasMemberInfo ? 1 : 0);
             await command.ExecuteNonQueryAsync(cancellationToken);
 
@@ -1418,13 +1444,17 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     call_ended_timestamp, is_pinned, content,
                     ref_type, ref_message_id, ref_channel_id, ref_guild_id,
                     forwarded_message_json, interaction_json, embeds_json, stickers_json,
-                    inline_emojis_json, webhook_id, poll_json, components_json, components_raw_json
+                    inline_emojis_json, webhook_id, poll_json, components_json, components_raw_json,
+                    flags, interaction_metadata_json,
+                    mention_everyone, activity_json, application_json, shared_client_theme_json, role_subscription_data_json
                 ) VALUES (
                     $id, $channelId, $authorId, $kind, $timestamp, $editedTimestamp,
                     $callEndedTimestamp, $isPinned, $content,
                     $refType, $refMessageId, $refChannelId, $refGuildId,
                     $forwardedMessageJson, $interactionJson, $embedsJson, $stickersJson,
-                    $inlineEmojisJson, $webhookId, $pollJson, $componentsJson, $componentsRawJson
+                    $inlineEmojisJson, $webhookId, $pollJson, $componentsJson, $componentsRawJson,
+                    $flags, $interactionMetadataJson,
+                    $mentionEveryone, $activityJson, $applicationJson, $sharedClientThemeJson, $roleSubscriptionDataJson
                 )
                 ON CONFLICT(id) DO UPDATE SET
                     channel_id = excluded.channel_id,
@@ -1447,7 +1477,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
                     webhook_id = excluded.webhook_id,
                     poll_json = excluded.poll_json,
                     components_json = excluded.components_json,
-                    components_raw_json = excluded.components_raw_json;
+                    components_raw_json = excluded.components_raw_json,
+                    flags = excluded.flags,
+                    interaction_metadata_json = excluded.interaction_metadata_json,
+                    mention_everyone = excluded.mention_everyone,
+                    activity_json = excluded.activity_json,
+                    application_json = excluded.application_json,
+                    shared_client_theme_json = excluded.shared_client_theme_json,
+                    role_subscription_data_json = excluded.role_subscription_data_json;
                 """
             )
         )
@@ -1502,6 +1539,22 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 "$componentsRawJson",
                 OrNull(message.ComponentsRawJson)
             );
+            command.Parameters.AddWithValue("$flags", (int)message.Flags);
+            command.Parameters.AddWithValue(
+                "$interactionMetadataJson",
+                OrNull(message.InteractionMetadataJson)
+            );
+            command.Parameters.AddWithValue("$mentionEveryone", message.MentionEveryone ? 1 : 0);
+            command.Parameters.AddWithValue("$activityJson", OrNull(message.ActivityJson));
+            command.Parameters.AddWithValue("$applicationJson", OrNull(message.ApplicationJson));
+            command.Parameters.AddWithValue(
+                "$sharedClientThemeJson",
+                OrNull(message.SharedClientThemeJson)
+            );
+            command.Parameters.AddWithValue(
+                "$roleSubscriptionDataJson",
+                OrNull(message.RoleSubscriptionDataJson)
+            );
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -1519,13 +1572,14 @@ public sealed class SqliteExportStore : IAsyncDisposable
         {
             await using var insertAttachment = CreateCommand(
                 """
-                INSERT INTO attachment (id, message_id, url, file_name, file_size_bytes)
-                VALUES ($id, $messageId, $url, $fileName, $fileSizeBytes)
+                INSERT INTO attachment (id, message_id, url, file_name, file_size_bytes, description)
+                VALUES ($id, $messageId, $url, $fileName, $fileSizeBytes, $description)
                 ON CONFLICT(id) DO UPDATE SET
                     message_id = excluded.message_id,
                     url = excluded.url,
                     file_name = excluded.file_name,
-                    file_size_bytes = excluded.file_size_bytes;
+                    file_size_bytes = excluded.file_size_bytes,
+                    description = excluded.description;
                 """
             );
             insertAttachment.Parameters.AddWithValue("$id", ToDbId(attachment.Id));
@@ -1535,6 +1589,10 @@ public sealed class SqliteExportStore : IAsyncDisposable
             insertAttachment.Parameters.AddWithValue(
                 "$fileSizeBytes",
                 attachment.FileSize.TotalBytes
+            );
+            insertAttachment.Parameters.AddWithValue(
+                "$description",
+                OrNull(attachment.Description)
             );
             await insertAttachment.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -1556,10 +1614,12 @@ public sealed class SqliteExportStore : IAsyncDisposable
                 """
                 INSERT INTO reaction (
                     message_id, emoji_id, emoji_name, emoji_code, emoji_is_animated,
-                    emoji_image_url, count, users_json
+                    emoji_image_url, count, users_json,
+                    burst_count, normal_count, me_burst, burst_colors_json
                 ) VALUES (
                     $messageId, $emojiId, $emojiName, $emojiCode, $emojiIsAnimated,
-                    $emojiImageUrl, $count, $usersJson
+                    $emojiImageUrl, $count, $usersJson,
+                    $burstCount, $normalCount, $meBurst, $burstColorsJson
                 );
                 """
             );
@@ -1583,6 +1643,13 @@ public sealed class SqliteExportStore : IAsyncDisposable
                         users.Select(DatabaseJson.MapReactionUser).ToArray()
                     )
                     : (object)DBNull.Value
+            );
+            insertReaction.Parameters.AddWithValue("$burstCount", reaction.BurstCount);
+            insertReaction.Parameters.AddWithValue("$normalCount", reaction.NormalCount);
+            insertReaction.Parameters.AddWithValue("$meBurst", reaction.MeBurst ? 1 : 0);
+            insertReaction.Parameters.AddWithValue(
+                "$burstColorsJson",
+                DatabaseJson.SerializeBurstColors(reaction.BurstColors)
             );
             await insertReaction.ExecuteNonQueryAsync(cancellationToken);
         }

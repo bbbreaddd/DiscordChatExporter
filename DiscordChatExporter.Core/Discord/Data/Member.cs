@@ -17,7 +17,10 @@ public partial record Member(
     DateTimeOffset? JoinedAt = null,
     DateTimeOffset? PremiumSince = null,
     DateTimeOffset? CommunicationDisabledUntil = null,
-    bool Pending = false
+    bool Pending = false,
+    int? Flags = null,
+    string? Permissions = null,
+    string? AvatarDecorationUrl = null
 ) : IHasId
 {
     public Snowflake Id { get; } = User.Id;
@@ -56,6 +59,14 @@ public partial record Member
             ?.GetDateTimeOffsetOrNull();
         var pending = memberJson.GetPropertyOrNull("pending")?.GetBooleanOrNull() ?? false;
 
+        var flags = memberJson.GetPropertyOrNull("flags")?.GetInt32OrNull();
+        var permissions = memberJson.GetPropertyOrNull("permissions")?.GetStringOrNull();
+        var avatarDecorationUrl = memberJson
+            .GetPropertyOrNull("avatar_decoration_data")
+            ?.GetPropertyOrNull("asset")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => $"https://cdn.discordapp.com/avatar-decorations/{author.Id}/{h}.png");
+
         return new Member(
             author,
             displayName,
@@ -64,7 +75,10 @@ public partial record Member
             joinedAt,
             premiumSince,
             communicationDisabledUntil,
-            pending
+            pending,
+            flags,
+            permissions,
+            avatarDecorationUrl
         );
     }
 
@@ -93,6 +107,13 @@ public partial record Member
             ?.GetDateTimeOffsetOrNull();
         var pending = json.GetPropertyOrNull("pending")?.GetBooleanOrNull() ?? false;
 
+        var flags = json.GetPropertyOrNull("flags")?.GetInt32OrNull();
+        var permissions = json.GetPropertyOrNull("permissions")?.GetStringOrNull();
+        var avatarDecorationUrl = json.GetPropertyOrNull("avatar_decoration_data")
+            ?.GetPropertyOrNull("asset")
+            ?.GetNonWhiteSpaceStringOrNull()
+            ?.Pipe(h => $"https://cdn.discordapp.com/avatar-decorations/{user.Id}/{h}.png");
+
         return new Member(
             user,
             displayName,
@@ -101,7 +122,10 @@ public partial record Member
             joinedAt,
             premiumSince,
             communicationDisabledUntil,
-            pending
+            pending,
+            flags,
+            permissions,
+            avatarDecorationUrl
         );
     }
 }

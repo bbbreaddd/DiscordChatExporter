@@ -35,7 +35,13 @@ public partial record Message(
     IReadOnlyList<MessageComponent>? Components = null,
     string? ComponentsRawJson = null,
     IReadOnlyList<Snowflake>? MentionedRoleIds = null,
-    IReadOnlyList<Snowflake>? MentionedChannelIds = null
+    IReadOnlyList<Snowflake>? MentionedChannelIds = null,
+    string? InteractionMetadataJson = null,
+    bool MentionEveryone = false,
+    string? ActivityJson = null,
+    string? ApplicationJson = null,
+    string? SharedClientThemeJson = null,
+    string? RoleSubscriptionDataJson = null
 ) : IHasId
 {
     public IReadOnlyList<MessageComponent> Components { get; } = Components ?? [];
@@ -228,6 +234,16 @@ public partial record Message
         // MarkdownParser.ExtractMentionedChannelIds), so it's recovered from content instead.
         var mentionedChannelIds = MarkdownParser.ExtractMentionedChannelIds(content);
 
+        var interactionMetadataJson = json.GetPropertyOrNull("interaction_metadata")?.GetRawText();
+
+        var mentionEveryone =
+            json.GetPropertyOrNull("mention_everyone")?.GetBooleanOrNull() ?? false;
+        var activityJson = json.GetPropertyOrNull("activity")?.GetRawText();
+        var applicationJson = json.GetPropertyOrNull("application")?.GetRawText();
+        var sharedClientThemeJson = json.GetPropertyOrNull("shared_client_theme")?.GetRawText();
+        var roleSubscriptionDataJson = json.GetPropertyOrNull("role_subscription_data")
+            ?.GetRawText();
+
         return new Message(
             id,
             kind,
@@ -252,7 +268,13 @@ public partial record Message
             components,
             componentsRawJson,
             mentionedRoleIds,
-            mentionedChannelIds
+            mentionedChannelIds,
+            interactionMetadataJson,
+            mentionEveryone,
+            activityJson,
+            applicationJson,
+            sharedClientThemeJson,
+            roleSubscriptionDataJson
         );
     }
 }
